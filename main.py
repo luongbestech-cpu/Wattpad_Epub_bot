@@ -3,8 +3,10 @@ import os
 import re
 import time
 import threading
+import smtplib
+from email.message import EmailMessage
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, urljoin, urldefrag
+from urllib.parse import urlparse, urldefrag
 import cloudscraper
 from bs4 import BeautifulSoup
 from ebooklib import epub
@@ -19,7 +21,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-type', 'text/html; charset=utf-8')
         self.end_headers()
-        self.wfile.write("Bot Truyyen đang hoạt động!".encode('utf-8'))
+        self.wfile.write("Bot Wattpad Kindle đang hoạt động!".encode('utf-8'))
 
     def log_message(self, format, *args):
         return
@@ -30,9 +32,14 @@ def run_web_server():
     server.serve_forever()
 
 # ============================================================
-# ⚙️ CẤU HÌNH BOT & CHỐNG TƯỜNG LỬA (CLOUDSCRAPER)
+# ⚙️ CẤU HÌNH BIẾN MÔI TRƯỜNG & GMAIL GỬI KINDLE
 # ============================================================
-BOT_TOKEN = os.getenv("BOT_TOKEN_TRUYENFULL") or os.getenv("BOT_TOKEN_WORDPRESS") or os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+# Cài đặt sẵn thông tin Gmail dùng để gửi file sang Kindle (lấy từ Environment Variables trên Render)
+GMAIL_USER = os.getenv("GMAIL_USER")          # Email Gmail của bạn (VD: tenncuaban@gmail.com)
+GMAIL_PASSWORD = os.getenv("GMAIL_PASSWORD")  # Mật khẩu ứng dụng (App Password) của Gmail
+KINDLE_EMAIL = os.getenv("KINDLE_EMAIL")      # Email Kindle của bạn (VD: tentai_khoan@kindle.com)
 
 scraper = cloudscraper.create_scraper(
     browser={
@@ -44,199 +51,157 @@ scraper = cloudscraper.create_scraper(
 
 def get_soup(url):
     try:
-        parsed_url = urlparse(url)
-        base_domain_url = f"{parsed_url.scheme}://{parsed_url.netloc}/"
-        
-        # Thêm Header giả lập người dùng thật và Referer chống chặn
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "Referer": base_domain_url,
-            "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
-        }
-        
-        response = scraper.get(url, headers=headers, timeout=35)
+        response = scraper.get(url, timeout=35)
         if response.status_code == 200:
             return BeautifulSoup(response.text, "lxml")
     except Exception as e:
         print(f"Lỗi tải {url}: {e}")
     return None
 
-def download_chapter(url):
-    soup = get_soup(url)
-    if not soup: return None
+def send_epub_to_kindle(file_path, book_title):
+    """Hàm tự động gửi file EPUB tới thiết bị Kindle qua Email"""
+    if not GMAIL_USER or not GMAIL_PASSWORD or not KINDLE_EMAIL:
+        print("⚠️ Chưa cấu hình đầy đủ thông tin Gmail/Kindle trong Environment Variables!")
+        return False
     
-    # Tìm vùng nội dung chương linh hoạt theo nhiều cấu trúc web phổ biến
-    content = soup.select_one(".chapter-content") or soup.select_one("#chapter-c") or soup.select_one(".chapter-c") or soup.select_one(".entry-content") or soup.select_one("article")
-    if not content: return None
-    
-    # 1. Xóa các thẻ rác hệ thống
-    for tag in content.find_all(["script", "style", "div", "ins", "iframe", "button", "form", "nav"]):
-        tag.decompose()
-        
-    # 2. Xóa các đoạn văn chứa từ khóa quảng cáo, chia sẻ, bản quyền
-    keywords_to_remove = [
-        "chia sẻ", "share", "thích", "đang tải", "có liên quan", 
-        "chương trước", "chương sau", "truyện chỉ đăng tại", "edit by", "nguồn"
-    ]
-    
-    for element in content.find_all(["p", "span", "section"]):
-        text = element.get_text().strip().lower()
-        if not text: continue
-        if any(kw in text for kw in keywords_to_remove):
-            element.decompose()
-        elif text in ["x", "facebook", "twitter", "pinterest"]:
-            element.decompose()
-        
-    return str(content)
+    try:
+        msg = EmailMessage()
+        msg['Subject'] = f"Convert {book_title}"
+        msg['From'] = GMAIL_USER
+        msg['To'] = KINDLE_EMAIL
+        msg.set_content(f"Tự động gửi truyện: {book_title} từ Telegram Bot.")
+
+        with open(file_path, 'rb') as f:
+            file_data = f.read()
+            file_name = os.path.basename(file_path)
+
+        msg.add_attachment(file_data, maintype='application', subtype='epub+zip', filename=file_name)
+
+        # Kết nối tới SMTP Server của Gmail
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+            smtp.login(GMAIL_USER, GMAIL_PASSWORD)
+            smtp.send_message(msg)
+        return True
+    except Exception as e:
+        print(f"Lỗi gửi Kindle: {e}")
+        return False
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url_match = re.findall(r"https?://[^\s]+", update.message.text or "")
+    text_msg = update.message.text or ""
+    url_match = re.findall(r"https?://[^\s]+", text_msg)
     if not url_match: return
     
-    status = await update.message.reply_text("⏳ Đang vượt tường lửa kết nối trang truyện (Quét danh sách chương)...")
-    
     story_url = url_match[0]
+    if "wattpad.com" not in story_url:
+        await update.message.reply_text("⚠️ Vui lòng gửi đường dẫn (link) truyện từ **Wattpad** nhé!")
+        return
+
+    status = await update.message.reply_text("⏳ Đang kết nối Wattpad để quét danh sách chương...")
+    
+    # Wattpad thường dùng API hoặc trang mục lục web
     main_soup = get_soup(story_url)
     if not main_soup:
-        await status.edit_text("❌ Không thể kết nối tới trang truyện. Web có thể đang chặn mạnh hoặc sai đường dẫn.")
+        await status.edit_text("❌ Không thể kết nối tới truyện Wattpad này.")
         return
         
-    title_el = main_soup.select_one("h1") or main_soup.select_one(".title") or main_soup.title
-    title = title_el.get_text().strip() if title_el else "Truyện"
-    if "|" in title:
-        title = title.split('|')[0].strip()
-        
-    # Lấy ảnh bìa
-    cover_url = None
-    img_tag = main_soup.select_one(".book img") or main_soup.select_one(".truyen-info img") or main_soup.find("meta", property="og:image")
-    if img_tag:
-        if img_tag.name == "meta":
-            cover_url = img_tag.get("content")
-        else:
-            cover_url = img_tag.get("src")
-
-    # --- HỆ THỐNG QUÉT PHÂN TRANG THÔNG MINH (HỖ TRỢ CẢ ?page=N VÀ NÚT BẤM) ---
-    links = []
-    parsed_base = urlparse(story_url)
-    base_domain = f"{parsed_base.scheme}://{parsed_base.netloc}"
-    current_page_url = story_url
-    page_num = 1
+    title_el = main_soup.select_one("h1") or main_soup.select_one(".story-title") or main_soup.title
+    title = title_el.get_text().strip() if title_el else "Truyen Wattpad"
     
-    while current_page_url:
-        soup = get_soup(current_page_url)
-        if not soup: break
-            
-        chapter_tags = soup.select("#list-chapter a, .list-chapter a, .chapter-list a, .entry-content a, article a")
-        if not chapter_tags: break
-            
-        new_chapters_in_page = 0
-        for a in chapter_tags:
-            href = a.get('href', '')
-            if href:
-                full_url = href if href.startswith("http") else base_domain + href
-                full_url = urldefrag(full_url)[0]
-                text = a.get_text().strip()
-                
-                # Bộ lọc nhận diện chương (Số, Chương, Hồi, Ngoại truyện...)
-                is_chap = re.match(r"^(\d+|PN\s*\d+|NT\s*\d+|chương|chuong|hồi|hoi|quyển|quyen|c\s*\d+)", text, flags=re.IGNORECASE)
-                
-                if text and is_chap and not any(l['url'] == full_url for l in links):
-                    links.append({"name": text, "url": full_url})
-                    new_chapters_in_page += 1
-                    
-        # QUAN TRỌNG: Không tìm thấy chương mới ở trang này -> Dừng vòng lặp ngay lập tức
-        if new_chapters_in_page == 0:
-            break
-            
-        # Tìm nút phân trang trang tiếp theo
-        pagination_links = soup.select(".pagination a, .pages a, .nav-links a")
-        next_url = None
-        for p_link in pagination_links:
-            text_p = p_link.get_text().strip()
-            if "Trang sau" in text_p or ">" in text_p or str(page_num + 1) == text_p:
-                next_url = p_link.get('href')
-                break
-                
-        if next_url:
-            next_full_url = next_url if next_url.startswith("http") else base_domain + next_url
-            if next_full_url == current_page_url: break
-            current_page_url = next_full_url
-            page_num += 1
-        else:
-            # Tự động sinh link phân trang theo dạng ?page=N nếu web dùng query parameter
-            if page_num < 80: # Giới hạn an toàn tối đa 80 trang
-                page_num += 1
-                clean_base = story_url.split("?")[0]
-                current_page_url = f"{clean_base}?page={page_num}"
-            else:
-                break
-                
-        time.sleep(0.4)
+    # Lấy ảnh bìa Wattpad
+    cover_url = None
+    img_tag = main_soup.select_one(".story-cover img") or main_soup.find("meta", property="og:image")
+    if img_tag:
+        cover_url = img_tag.get("content") if img_tag.name == "meta" else img_tag.get("src")
+
+    # Lấy danh sách link chương trên Wattpad
+    links = []
+    chapter_tags = main_soup.select(".table-of-contents li a, .story-parts li a, ul.toc li a")
+    
+    if not chapter_tags:
+        # Fallback quét toàn bộ thẻ a nếu cấu trúc thay đổi
+        chapter_tags = main_soup.find_all("a", href=True)
+
+    for a in chapter_tags:
+        href = a.get('href', '')
+        if "/story/" in href or "-chuyen-" in href or "/chap-" in href:
+            full_url = href if href.startswith("http") else "https://www.wattpad.com" + href
+            full_url = urldefrag(full_url)[0]
+            text = a.get_text().strip()
+            if text and not any(l['url'] == full_url for l in links):
+                links.append({"name": text, "url": full_url})
 
     if not links:
-        await status.edit_text("❌ Không tìm thấy chương nào. Hãy kiểm tra lại đường dẫn truyện.")
+        await status.edit_text("❌ Không tìm thấy chương nào trên Wattpad. Hãy kiểm tra lại link.")
         return
         
-    await status.edit_text(f"📚 {title}\n✅ Quét thành công tổng cộng {len(links)} chương. Đang tiến hành tải...")
+    await status.edit_text(f"📚 {title}\n✅ Tìm thấy {len(links)} chương. Đang tải nội dung...")
     
-    # Tạo file EPUB chuẩn Kindle
     book = epub.EpubBook()
-    book.set_identifier('epub_' + re.sub(r'\W+', '', title))
+    book.set_identifier('wattpad_' + re.sub(r'\W+', '', title))
     book.set_title(title)
     book.set_language('vi')
     
-    # Thêm ảnh bìa
     if cover_url:
         try:
-            full_cover_url = cover_url if cover_url.startswith("http") else base_domain + cover_url
-            img_data = scraper.get(full_cover_url, timeout=15).content
+            img_data = scraper.get(cover_url, timeout=15).content
             book.set_cover("cover.jpg", img_data)
-        except Exception as e:
-            print(f"Lỗi tải ảnh bìa: {e}")
+        except:
+            pass
 
     chapters_list = []
     success_count = 0
     
     for i, item in enumerate(links):
-        content = download_chapter(item['url'])
-        if content:
-            chap = epub.EpubHtml(title=item['name'], file_name=f"chap_{i+1}.xhtml")
-            chap.content = f"<h2>{item['name']}</h2>{content}"
-            book.add_item(chap)
-            chapters_list.append(chap)
-            success_count += 1
+        chap_soup = get_soup(item['url'])
+        if chap_soup:
+            content_div = chap_soup.select_one(".pre-text") or chap_soup.select_one(".part-text") or chap_soup.select_one("div[data-p-id]")
+            if content_div:
+                for tag in content_div.find_all(["script", "style", "iframe"]):
+                    tag.decompose()
+                
+                chap = epub.EpubHtml(title=item['name'], file_name=f"chap_{i+1}.xhtml")
+                chap.content = f"<h2>{item['name']}</h2>{str(content_div)}"
+                book.add_item(chap)
+                chapters_list.append(chap)
+                success_count += 1
         
-        if i % 15 == 0 or i == len(links) - 1:
+        if i % 10 == 0 or i == len(links) - 1:
             pct = int((i / len(links)) * 100)
             try:
                 await status.edit_text(f"📚 {title}\n⏳ Đang tải: {pct}%\n({i+1}/{len(links)})")
             except:
                 pass
-        
         time.sleep(0.3)
 
     if success_count == 0:
-        await status.edit_text("❌ Tải thất bại do trang web chặn toàn bộ nội dung.")
+        await status.edit_text("❌ Không thể trích xuất nội dung chương từ Wattpad.")
         return
 
-    # Cấu hình Mục lục (TOC) & Luồng đọc chuẩn Kindle
     book.toc = tuple(chapters_list)
     book.spine = ['nav'] + chapters_list
-
     book.add_item(epub.EpubNcx())
     book.add_item(epub.EpubNav())
     
-    safe_title = re.sub(r'[\\/*?:"<>|]', "", title).strip() or "Truyen"
+    safe_title = re.sub(r'[\\/*?:"<>|]', "", title).strip() or "TruyenWattpad"
     file_name = f"{safe_title}.epub"
-    
     epub.write_epub(file_name, book)
     
+    # Gửi file về Telegram trước
     await update.message.reply_document(
         document=open(file_name, "rb"), 
-        caption=f"✅ Xong: {title}\n📖 Đã tải đủ trọn bộ {success_count}/{len(links)} chương + Ảnh bìa & Mục lục chuẩn Kindle!"
+        caption=f"✅ Xong: {title}\n📖 Đã tải {success_count}/{len(links)} chương từ Wattpad!"
     )
-    await status.delete()
+    
+    # Tự động gửi sang Kindle nếu đã cấu hình email
+    if GMAIL_USER and KINDLE_EMAIL:
+        await status.edit_text("📧 Đang tự động gửi file EPUB sang Kindle của bạn...")
+        sent_ok = send_epub_to_kindle(file_name, title)
+        if sent_ok:
+            await status.edit_text(f"✅ Đã gửi sách **{title}** thẳng vào Kindle thành công qua email ({KINDLE_EMAIL})!")
+        else:
+            await status.edit_text("⚠️ Gửi Kindle thất bại. Hãy kiểm tra lại mật khẩu ứng dụng Gmail trên Render.")
+    else:
+        await status.delete()
     
     if os.path.exists(file_name):
         os.remove(file_name)
@@ -244,7 +209,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     threading.Thread(target=run_web_server, daemon=True).start()
     if not BOT_TOKEN:
-        print("❌ Lỗi: Thiếu BOT_TOKEN trong Environment Variables!")
+        print("❌ Thiếu BOT_TOKEN!")
         return
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
