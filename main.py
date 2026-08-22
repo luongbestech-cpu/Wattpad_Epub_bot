@@ -39,7 +39,6 @@ GMAIL_USER = os.getenv("GMAIL_USER")
 GMAIL_PASSWORD = os.getenv("GMAIL_PASSWORD")  
 KINDLE_EMAIL = os.getenv("KINDLE_EMAIL")      
 
-# Sử dụng cấu hình 'chrome' chuẩn hợp lệ của cloudscraper để tránh lỗi RuntimeError
 scraper = cloudscraper.create_scraper(
     browser={
         'browser': 'chrome',
@@ -50,13 +49,12 @@ scraper = cloudscraper.create_scraper(
 
 def get_soup(url):
     try:
-        # Chuyển hướng sang bản mobile m.wattpad.com để cấu trúc HTML gọn nhẹ dễ cào
-        if "www.wattpad.com" in url:
-            url = url.replace("www.wattpad.com", "m.wattpad.com")
-            
+        # Giữ nguyên cấu trúc link gốc của Wattpad, thêm đầy đủ header chống chặn
         headers = {
-            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1",
-            "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Referer": "https://www.wattpad.com/"
         }
         response = scraper.get(url, headers=headers, timeout=35)
         if response.status_code == 200:
@@ -99,11 +97,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Vui lòng gửi link truyện từ **Wattpad** nhé!")
         return
 
-    status = await update.message.reply_text("⏳ Đang kết nối Wattpad (Bản Mobile tối ưu)...")
+    status = await update.message.reply_text("⏳ Đang kết nối Wattpad và vượt qua tường lửa...")
     
     main_soup = get_soup(story_url)
     if not main_soup:
-        await status.edit_text("❌ Không thể kết nối tới trang truyện Wattpad này.")
+        await status.edit_text("❌ Không thể kết nối tới trang truyện Wattpad này. Hãy chắc chắn link đúng và truyện ở chế độ công khai.")
         return
         
     # Lấy tiêu đề truyện
@@ -118,9 +116,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if img_tag:
         cover_url = img_tag.get("content") if img_tag.name == "meta" else img_tag.get("src")
 
-    # Lấy danh sách chương từ bản mobile
+    # Lấy danh sách chương
     links = []
-    chapter_tags = main_soup.select("ul.table-of-contents a, .parts-list a, .story-parts a, li.part-item a")
+    chapter_tags = main_soup.select("ul.table-of-contents a, .parts-list a, .story-parts a, li.part-item a, .toc-item a")
     
     if not chapter_tags:
         chapter_tags = main_soup.find_all("a", href=True)
@@ -170,7 +168,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i, item in enumerate(links):
         chap_soup = get_soup(item['url'])
         if chap_soup:
-            content_div = chap_soup.select_one(".part-text") or chap_soup.select_one("pre") or chap_soup.select_one(".story-text")
+            content_div = chap_soup.select_one(".part-text") or chap_soup.select_one("pre") or chap_soup.select_one(".story-text") or chap_soup.select_one("div[data-p-id]")
             if content_div:
                 for tag in content_div.find_all(["script", "style", "iframe", "button"]):
                     tag.decompose()
@@ -187,7 +185,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await status.edit_text(f"📚 {title}\n⏳ Đang tải: {pct}%\n({i+1}/{len(links)})")
             except:
                 pass
-        time.sleep(0.3)
+        time.sleep(0.4)
 
     if success_count == 0:
         await status.edit_text("❌ Không thể tải nội dung chương từ Wattpad.")
