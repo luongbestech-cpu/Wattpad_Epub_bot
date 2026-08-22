@@ -21,7 +21,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-type', 'text/html; charset=utf-8')
         self.end_headers()
-        self.wfile.write("Bot Wattpad Mobile đang hoạt động!".encode('utf-8'))
+        self.wfile.write("Bot Wattpad Kindle đang hoạt động!".encode('utf-8'))
 
     def log_message(self, format, *args):
         return
@@ -39,18 +39,18 @@ GMAIL_USER = os.getenv("GMAIL_USER")
 GMAIL_PASSWORD = os.getenv("GMAIL_PASSWORD")  
 KINDLE_EMAIL = os.getenv("KINDLE_EMAIL")      
 
-# Ép cloudscraper giả lập trình duyệt trên điện thoại để lấy bản m.wattpad.com sạch sẽ
+# Sử dụng cấu hình 'chrome' chuẩn hợp lệ của cloudscraper để tránh lỗi RuntimeError
 scraper = cloudscraper.create_scraper(
     browser={
-        'browser': 'iphone',
-        'platform': 'ios',
-        'desktop': False
+        'browser': 'chrome',
+        'platform': 'windows',
+        'desktop': True
     }
 )
 
 def get_soup(url):
     try:
-        # Chuyển hướng link thường sang bản mobile m.wattpad.com để dễ cào dữ liệu
+        # Chuyển hướng sang bản mobile m.wattpad.com để cấu trúc HTML gọn nhẹ dễ cào
         if "www.wattpad.com" in url:
             url = url.replace("www.wattpad.com", "m.wattpad.com")
             
@@ -120,11 +120,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Lấy danh sách chương từ bản mobile
     links = []
-    # Bản mobile của Wattpad chứa danh sách mục lục trong các thẻ ul/li hoặc bảng mục lục
     chapter_tags = main_soup.select("ul.table-of-contents a, .parts-list a, .story-parts a, li.part-item a")
     
     if not chapter_tags:
-        # Fallback quét toàn bộ thẻ a nếu cấu trúc linh hoạt
         chapter_tags = main_soup.find_all("a", href=True)
 
     for a in chapter_tags:
@@ -134,15 +132,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             full_url = urldefrag(full_url)[0]
             text = a.get_text().strip()
             
-            # Lọc chỉ lấy các link là chương truyện thực tế
             if text and len(text) < 100 and not any(l['url'] == full_url for l in links):
                 if any(x in full_url for x in ["/story/", "-"]):
-                    # Đảm bảo không lấy nhầm link trang chủ hoặc link rác
                     if re.search(r"\d+-[a-zA-Z0-9-]+", full_url):
                         links.append({"name": text, "url": full_url})
 
     if not links:
-        # Thêm một lớp vét cạn tổng lực cuối cùng nếu giao diện mobile thay đổi ID
         for a in main_soup.find_all("a", href=True):
             href = a.get('href', '')
             text = a.get_text().strip()
@@ -175,7 +170,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i, item in enumerate(links):
         chap_soup = get_soup(item['url'])
         if chap_soup:
-            # Nội dung chương trên bản mobile Wattpad
             content_div = chap_soup.select_one(".part-text") or chap_soup.select_one("pre") or chap_soup.select_one(".story-text")
             if content_div:
                 for tag in content_div.find_all(["script", "style", "iframe", "button"]):
