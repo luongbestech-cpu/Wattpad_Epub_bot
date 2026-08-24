@@ -69,27 +69,47 @@ def get_chapters(url):
     soup = get_content(url)
     if not soup: return [], "Truyện", None
     
-    # ================= WATTPAD =================
+    # ================= XỬ LÝ RIÊNG CHO WATTPAD =================
     if "wattpad.com" in url:
-        title_el = soup.select_one(".story-info__title") or soup.select_one("h1") or soup.title
+        # Lấy tên truyện từ thẻ h1 chuẩn trong HTML bạn cung cấp
+        title_el = soup.select_one("h1._2kR5x") or soup.select_one("h1") or soup.title
         title = title_el.get_text().strip() if title_el else "Truyện Wattpad"
         
         cover_url = None
-        img_el = soup.select_one(".story-cover img") or soup.select_one(".cover img") or soup.find("meta", property="og:image")
-        if img_el:
-            cover_url = img_el.get("src") or img_el.get("content")
+        img_el = soup.select_one("img.cover__BlyZa") or soup.select_one(".coverWrapper__t2Ve8 img")
+        if img_el and img_el.get("src"):
+            cover_url = img_el["src"]
             
         chapters = []
-        # Lấy danh sách link chương từ Wattpad
-        for a in soup.select(".table-of-contents a, .story-parts a, ul.list-parts a, .part-item a"):
-            href = urldefrag(urljoin(url, a.get("href")))[0]
-            text = a.get_text().strip()
-            if href and text:
-                if not any(c['url'] == href for c in chapters):
-                    chapters.append({"name": text, "url": href})
+        # Quét tất cả các thẻ a trên trang chủ/mục lục để tìm link chương dạng số ID (vd: wattpad.com/1234567-chuong-1)
+        for a in soup.find_all("a", href=True):
+            href = a.get("href")
+            # Link chương của wattpad thường là dạng số thuần túy hoặc chứa ID chương sau tên truyện
+            if re.search(r"wattpad\.com/\d+", href) and "/story/" not in href and "/user/" not in href:
+                full_url = urldefrag(urljoin(url, href))[0]
+                text = a.get_text().strip()
+                # Lọc lấy những link có nội dung text hợp lệ làm tên chương
+                if text and len(text) < 150:
+                    if not any(c['url'] == full_url for c in chapters):
+                        chapters.append({"name": text, "url": full_url})
+                        
+        # Nếu link trang chủ dạng /story/... không quét đủ, tự động chuyển hướng sang trang /parts để vét sạch danh sách chương
+        if len(chapters) < 5 and not url.endswith("/parts"):
+            parts_url = url.rstrip('/') + "/parts"
+            soup_parts = get_content(parts_url)
+            if soup_parts:
+                for a in soup_parts.find_all("a", href=True):
+                    href = a.get("href")
+                    if re.search(r"wattpad\.com/\d+", href) and "/story/" not in href:
+                        full_url = urldefrag(urljoin(url, href))[0]
+                        text = a.get_text().strip()
+                        if text and len(text) < 150:
+                            if not any(c['url'] == full_url for c in chapters):
+                                chapters.append({"name": text, "url": full_url})
+
         return chapters, title, cover_url
 
-    # ================= WORDPRESS / LEOSANSUTU =================
+    # ================= XỬ LÝ CHO WORDPRESS / CÁC TRANG KHÁC =================
     title_el = soup.select_one("h1.entry-title") or soup.select_one("h1") or soup.title
     title = title_el.get_text().strip() if title_el else "Truyện WordPress"
     if "|" in title:
@@ -122,9 +142,9 @@ def download_chap(url):
     soup = get_content(url)
     if not soup: return None
     
-    # ================= WATTPAD =================
+    # ================= TẢI NỘI DUNG CHƯƠNG WATTPAD =================
     if "wattpad.com" in url:
-        paragraphs = soup.select(".story-text p, pre p, .p-block")
+        paragraphs = soup.select(".story-text p, pre p, .p-block, div[data-p-id]")
         if paragraphs:
             return "".join([str(p) for p in paragraphs])
         
@@ -133,7 +153,7 @@ def download_chap(url):
             return str(content_div)
         return None
 
-    # ================= WORDPRESS =================
+    # ================= TẢI NỘI DUNG CHƯƠNG WORDPRESS =================
     content = soup.select_one(".entry-content") or soup.select_one(".post-content") or soup.select_one("article")
     if not content: return None
     
@@ -186,11 +206,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = re.findall(r"https?://[^\s]+", update.message.text or "")
     if not url: return
     
-    status = await update.message.reply_text("⏳ Đang phân tích đường dẫn truyện...")
+    status = await update.message.reply_text("⏳ Đang phân tích đường dẫn truyện Wattpad/WordPress...")
     chapters, title, cover_url = get_chapters(url[0])
     
     if not chapters:
-        await status.edit_text("❌ Không tìm thấy chương nào. Hãy chắc chắn bạn gửi link trang chủ Wattpad dạng `https://www.wattpad.com/story/...` hoặc mục lục WordPress chính xác.")
+        await status.edit_text("❌ Không tìm thấy chương nào. Hãy chắc chắn bạn gửi link trang chủ Wattpad dạng `https://www.wattpad.com/story/...`")
         return
 
     await status.edit_text(f"📚 {title}\n✅ Tìm thấy {len(chapters)} chương. Đang tải dữ liệu...")
