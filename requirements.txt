@@ -1,5 +1,6 @@
-python-telegram-bot>=21.0
-beautifulsoup4>=4.12.0
-cloudscraper>=1.2.71
-EbookLib>=0.18
-lxml>=4.9.0
+python-telegram-bot
+beautifulsoup4
+cloudscraper
+ebooklib
+lxml
+requests
