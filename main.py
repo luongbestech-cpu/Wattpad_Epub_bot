@@ -8,14 +8,14 @@ from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urljoin, urldefrag
-import requests
+import cloudscraper
 from bs4 import BeautifulSoup
 from ebooklib import epub
 from telegram import Update
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
 # ============================================================
-# 🌐 WEB SERVER DUMMY CHO RENDER
+# 🌐 WEB SERVER DUMMY CHO RENDER (FIX LỖI UPTIMEROBOT 501)
 # ============================================================
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -38,7 +38,7 @@ def run_web_server():
     server.serve_forever()
 
 # ============================================================
-# ⚙️ CẤU HÌNH BOT & PHIÊN LÀM VIỆC
+# ⚙️ CẤU HÌNH BOT & CLOUDSCRAPER (VƯỢT CLOUDFLARE WATTPAD)
 # ============================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN_WORDPRESS") or os.getenv("BOT_TOKEN")
 
@@ -48,17 +48,17 @@ SENDER_EMAIL = os.getenv("SENDER_EMAIL", "")
 SENDER_PASSWORD = os.getenv("SENDER_PASSWORD", "") 
 KINDLE_EMAIL = os.getenv("KINDLE_EMAIL", "")        
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7"
-}
-
-session = requests.Session()
-session.headers.update(HEADERS)
+scraper = cloudscraper.create_scraper(
+    browser={
+        'browser': 'chrome',
+        'platform': 'windows',
+        'desktop': True
+    }
+)
 
 def get_content(url):
     try:
-        res = session.get(url, timeout=25)
+        res = scraper.get(url, timeout=30)
         if res.status_code == 200:
             return BeautifulSoup(res.text, "lxml")
     except Exception as e:
@@ -69,19 +69,19 @@ def get_chapters(url):
     soup = get_content(url)
     if not soup: return [], "Truyện", None
     
-    # Xử lý riêng cho Wattpad
+    # ================= WATTPAD =================
     if "wattpad.com" in url:
         title_el = soup.select_one(".story-info__title") or soup.select_one("h1") or soup.title
         title = title_el.get_text().strip() if title_el else "Truyện Wattpad"
         
         cover_url = None
-        img_el = soup.select_one(".story-cover img") or soup.select_one(".cover img")
-        if img_el and img_el.get("src"):
-            cover_url = img_el["src"]
+        img_el = soup.select_one(".story-cover img") or soup.select_one(".cover img") or soup.find("meta", property="og:image")
+        if img_el:
+            cover_url = img_el.get("src") or img_el.get("content")
             
         chapters = []
-        # Lấy các link chương từ danh sách mục lục Wattpad
-        for a in soup.select(".table-of-contents a, .story-parts a, ul.list-parts a"):
+        # Lấy danh sách link chương từ Wattpad
+        for a in soup.select(".table-of-contents a, .story-parts a, ul.list-parts a, .part-item a"):
             href = urldefrag(urljoin(url, a.get("href")))[0]
             text = a.get_text().strip()
             if href and text:
@@ -89,7 +89,7 @@ def get_chapters(url):
                     chapters.append({"name": text, "url": href})
         return chapters, title, cover_url
 
-    # Xử lý cho WordPress / Leosansutu cũ
+    # ================= WORDPRESS / LEOSANSUTU =================
     title_el = soup.select_one("h1.entry-title") or soup.select_one("h1") or soup.title
     title = title_el.get_text().strip() if title_el else "Truyện WordPress"
     if "|" in title:
@@ -122,19 +122,18 @@ def download_chap(url):
     soup = get_content(url)
     if not soup: return None
     
-    # Xử lý nội dung chương cho Wattpad
+    # ================= WATTPAD =================
     if "wattpad.com" in url:
-        paragraphs = soup.select(".story-text p, pre p, .p")
+        paragraphs = soup.select(".story-text p, pre p, .p-block")
         if paragraphs:
-            content_html = "".join([str(p) for p in paragraphs])
-            return content_html
-        # Fallback nếu cấu trúc thay đổi
+            return "".join([str(p) for p in paragraphs])
+        
         content_div = soup.select_one(".reading-content") or soup.select_one("pre")
         if content_div:
             return str(content_div)
         return None
 
-    # Xử lý cho WordPress
+    # ================= WORDPRESS =================
     content = soup.select_one(".entry-content") or soup.select_one(".post-content") or soup.select_one("article")
     if not content: return None
     
@@ -191,7 +190,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chapters, title, cover_url = get_chapters(url[0])
     
     if not chapters:
-        await status.edit_text("❌ Không tìm thấy chương nào. Hãy chắc chắn bạn gửi link trang mục lục chính của truyện (không phải link một chương lẻ).")
+        await status.edit_text("❌ Không tìm thấy chương nào. Hãy chắc chắn bạn gửi link trang chủ Wattpad dạng `https://www.wattpad.com/story/...` hoặc mục lục WordPress chính xác.")
         return
 
     await status.edit_text(f"📚 {title}\n✅ Tìm thấy {len(chapters)} chương. Đang tải dữ liệu...")
@@ -213,7 +212,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if cover_url:
         try:
-            img_res = session.get(cover_url, timeout=15)
+            img_res = scraper.get(cover_url, timeout=15)
             if img_res.status_code == 200:
                 book.set_cover("cover.jpg", img_res.content)
         except Exception as e:
