@@ -1,289 +1,342 @@
-import asyncio
 import os
 import re
-import threading
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.application import MIMEApplication
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urljoin, urldefrag
-import cloudscraper
-from bs4 import BeautifulSoup
-from ebooklib import epub
+import asyncio
+import zipfile
+import tempfile
+from pathlib import Path
+from html import escape
+
 from telegram import Update
-from telegram.ext import Application, ContextTypes, MessageHandler, filters
-
-# ============================================================
-# 🌐 WEB SERVER DUMMY CHO RENDER (FIX LỖI UPTIMEROBOT 501)
-# ============================================================
-class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'text/html; charset=utf-8')
-        self.end_headers()
-        self.wfile.write("Bot đọc truyện WordPress & Wattpad đang hoạt động!".encode('utf-8'))
-
-    def do_HEAD(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'text/html; charset=utf-8')
-        self.end_headers()
-
-    def log_message(self, format, *args):
-        return
-
-def run_web_server():
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
-    server.serve_forever()
-
-# ============================================================
-# ⚙️ CẤU HÌNH BOT & CLOUDSCRAPER (VƯỢT CLOUDFLARE WATTPAD)
-# ============================================================
-BOT_TOKEN = os.getenv("BOT_TOKEN_WORDPRESS") or os.getenv("BOT_TOKEN")
-
-SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
-SENDER_EMAIL = os.getenv("SENDER_EMAIL", "")        
-SENDER_PASSWORD = os.getenv("SENDER_PASSWORD", "") 
-KINDLE_EMAIL = os.getenv("KINDLE_EMAIL", "")        
-
-scraper = cloudscraper.create_scraper(
-    browser={
-        'browser': 'chrome',
-        'platform': 'windows',
-        'desktop': True
-    }
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
 )
 
-def get_content(url):
-    try:
-        res = scraper.get(url, timeout=30)
-        if res.status_code == 200:
-            return BeautifulSoup(res.text, "lxml")
-    except Exception as e:
-        print(f"Lỗi tải {url}: {e}")
-    return None
+BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN")
 
-def get_chapters(url):
-    soup = get_content(url)
-    if not soup: return [], "Truyện", None
-    
-    # ================= XỬ LÝ RIÊNG CHO WATTPAD =================
-    if "wattpad.com" in url:
-        # Lấy tên truyện từ thẻ h1 chuẩn trong HTML bạn cung cấp
-        title_el = soup.select_one("h1._2kR5x") or soup.select_one("h1") or soup.title
-        title = title_el.get_text().strip() if title_el else "Truyện Wattpad"
-        
-        cover_url = None
-        img_el = soup.select_one("img.cover__BlyZa") or soup.select_one(".coverWrapper__t2Ve8 img")
-        if img_el and img_el.get("src"):
-            cover_url = img_el["src"]
-            
-        chapters = []
-        # Quét tất cả các thẻ a trên trang chủ/mục lục để tìm link chương dạng số ID (vd: wattpad.com/1234567-chuong-1)
-        for a in soup.find_all("a", href=True):
-            href = a.get("href")
-            # Link chương của wattpad thường là dạng số thuần túy hoặc chứa ID chương sau tên truyện
-            if re.search(r"wattpad\.com/\d+", href) and "/story/" not in href and "/user/" not in href:
-                full_url = urldefrag(urljoin(url, href))[0]
-                text = a.get_text().strip()
-                # Lọc lấy những link có nội dung text hợp lệ làm tên chương
-                if text and len(text) < 150:
-                    if not any(c['url'] == full_url for c in chapters):
-                        chapters.append({"name": text, "url": full_url})
-                        
-        # Nếu link trang chủ dạng /story/... không quét đủ, tự động chuyển hướng sang trang /parts để vét sạch danh sách chương
-        if len(chapters) < 5 and not url.endswith("/parts"):
-            parts_url = url.rstrip('/') + "/parts"
-            soup_parts = get_content(parts_url)
-            if soup_parts:
-                for a in soup_parts.find_all("a", href=True):
-                    href = a.get("href")
-                    if re.search(r"wattpad\.com/\d+", href) and "/story/" not in href:
-                        full_url = urldefrag(urljoin(url, href))[0]
-                        text = a.get_text().strip()
-                        if text and len(text) < 150:
-                            if not any(c['url'] == full_url for c in chapters):
-                                chapters.append({"name": text, "url": full_url})
+INPUT_DIR = Path("chapters")
+OUTPUT_DIR = Path("output")
 
-        return chapters, title, cover_url
+INPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR.mkdir(exist_ok=True)
 
-    # ================= XỬ LÝ CHO WORDPRESS / CÁC TRANG KHÁC =================
-    title_el = soup.select_one("h1.entry-title") or soup.select_one("h1") or soup.title
-    title = title_el.get_text().strip() if title_el else "Truyện WordPress"
-    if "|" in title:
-        title = title.split('|')[0].strip()
-        
-    cover_url = None
-    og_img = soup.find("meta", property="og:image")
-    if og_img and og_img.get("content"):
-        cover_url = og_img["content"]
-        
-    content_area = soup.select_one(".entry-content") or soup.select_one(".post-content") or soup.select_one("article") or soup.body
-    if not cover_url and content_area:
-        first_img = content_area.find("img")
-        if first_img and first_img.get("src"):
-            cover_url = first_img["src"]
+
+def natural_key(text):
+    return [
+        int(x) if x.isdigit() else x.lower()
+        for x in re.split(r"(\d+)", text)
+    ]
+
+
+def read_chapters():
+    files = sorted(
+        [
+            p for p in INPUT_DIR.iterdir()
+            if p.suffix.lower() in {".txt", ".html", ".htm"}
+        ],
+        key=lambda p: natural_key(p.stem),
+    )
 
     chapters = []
-    if content_area:
-        for a in content_area.find_all("a", href=True):
-            href = urldefrag(urljoin(url, a.get("href")))[0]
-            text = a.get_text().strip()
-            is_chapter = re.match(r"^(\d+|chuong|chương|hồi|hoi|quyển|quyen|phần|phan|ngoại truyện|ngoai truyen|pn|nt|c\s*\d+)", text, flags=re.IGNORECASE)
-            if is_chapter and len(text) < 100: 
-                if not any(c['url'] == href for c in chapters):
-                    chapters.append({"name": text, "url": href})
-                    
-    return chapters, title, cover_url
 
-def download_chap(url):
-    soup = get_content(url)
-    if not soup: return None
-    
-    # ================= TẢI NỘI DUNG CHƯƠNG WATTPAD =================
-    if "wattpad.com" in url:
-        paragraphs = soup.select(".story-text p, pre p, .p-block, div[data-p-id]")
-        if paragraphs:
-            return "".join([str(p) for p in paragraphs])
-        
-        content_div = soup.select_one(".reading-content") or soup.select_one("pre")
-        if content_div:
-            return str(content_div)
-        return None
+    for path in files:
+        if path.suffix.lower() == ".txt":
+            text = path.read_text(
+                encoding="utf-8",
+                errors="ignore"
+            )
 
-    # ================= TẢI NỘI DUNG CHƯƠNG WORDPRESS =================
-    content = soup.select_one(".entry-content") or soup.select_one(".post-content") or soup.select_one("article")
-    if not content: return None
-    
-    for t in content.find_all(["script", "style", "ins", "button", "iframe", "form", "nav", "comments"]): 
-        t.decompose()
-        
-    keywords_to_remove = [
-        "chia sẻ", "share", "thích", "đang tải", "có liên quan", 
-        "chương trước", "chương sau", "truyện chỉ đăng tại", "edit by",
-        "bấm để", "để lại bình luận", "thông báo", "mật khẩu", "gợi ý"
-    ]
-    
-    for element in content.find_all(["div", "p", "span", "section", "footer"]):
-        text = element.get_text().strip().lower()
-        if not text:
-            continue
-        if any(kw in text for kw in keywords_to_remove):
-            element.decompose()
-        elif text in ["x", "facebook", "twitter", "pinterest", "tumblr"]:
-            element.decompose()
-            
-    return str(content)
+            title = path.stem
 
-def send_to_kindle_email(file_path, title):
-    if not SENDER_EMAIL or not SENDER_PASSWORD or not KINDLE_EMAIL:
-        return False, "Chưa cấu hình thông tin Email trên Render."
-    try:
-        msg = MIMEMultipart()
-        msg['From'] = SENDER_EMAIL
-        msg['To'] = KINDLE_EMAIL
-        msg['Subject'] = f"Convert {title}"
+            paragraphs = [
+                p.strip()
+                for p in text.splitlines()
+                if p.strip()
+            ]
 
-        msg.attach(MIMEText("Gửi file EPUB từ Bot tự động."))
+            content = "\n".join(
+                f"<p>{escape(p)}</p>"
+                for p in paragraphs
+            )
 
-        with open(file_path, "rb") as f:
-            part = MIMEApplication(f.read(), Name=os.path.basename(file_path))
-            part.add_header('Content-Disposition', 'attachment', filename=os.path.basename(file_path))
-            msg.attach(part)
+        else:
+            from bs4 import BeautifulSoup
 
-        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-        server.starttls()
-        server.login(SENDER_EMAIL, SENDER_PASSWORD)
-        server.sendmail(SENDER_EMAIL, KINDLE_EMAIL, msg.as_string())
-        server.quit()
-        return True, "Đã gửi thành công vào Kindle!"
-    except Exception as e:
-        return False, f"Lỗi gửi Kindle: {str(e)}"
+            html = path.read_text(
+                encoding="utf-8",
+                errors="ignore"
+            )
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = re.findall(r"https?://[^\s]+", update.message.text or "")
-    if not url: return
-    
-    status = await update.message.reply_text("⏳ Đang phân tích đường dẫn truyện Wattpad/WordPress...")
-    chapters, title, cover_url = get_chapters(url[0])
-    
-    if not chapters:
-        await status.edit_text("❌ Không tìm thấy chương nào. Hãy chắc chắn bạn gửi link trang chủ Wattpad dạng `https://www.wattpad.com/story/...`")
-        return
+            soup = BeautifulSoup(html, "html.parser")
 
-    await status.edit_text(f"📚 {title}\n✅ Tìm thấy {len(chapters)} chương. Đang tải dữ liệu...")
+            title = (
+                soup.find("title").get_text(strip=True)
+                if soup.find("title")
+                else path.stem
+            )
 
-    results = {}
-    for i, c in enumerate(chapters):
-        results[i] = download_chap(c["url"])
-        if i % 10 == 0 or i == len(chapters) - 1:
-            pct = int(((i + 1) / len(chapters)) * 100)
-            try:
-                await status.edit_text(f"📚 {title}\n⏳ Đang tải nội dung: {pct}%\n({i+1}/{len(chapters)})")
-            except:
-                pass
+            body = soup.body or soup
 
-    book = epub.EpubBook()
-    book.set_identifier('story_' + re.sub(r'\W+', '', title))
-    book.set_title(title)
-    book.set_language('vi')
+            paragraphs = [
+                p.get_text(" ", strip=True)
+                for p in body.find_all("p")
+                if p.get_text(strip=True)
+            ]
 
-    if cover_url:
-        try:
-            img_res = scraper.get(cover_url, timeout=15)
-            if img_res.status_code == 200:
-                book.set_cover("cover.jpg", img_res.content)
-        except Exception as e:
-            print(f"Lỗi tải ảnh bìa: {e}")
+            content = "\n".join(
+                f"<p>{escape(p)}</p>"
+                for p in paragraphs
+            )
 
-    chapters_list = []
-    for i, c in enumerate(chapters):
-        if results.get(i):
-            chap = epub.EpubHtml(title=c["name"], file_name=f"chap_{i+1}.xhtml")
-            chap.content = f"<h2>{c['name']}</h2>{results[i]}"
-            book.add_item(chap)
-            chapters_list.append(chap)
+        chapters.append({
+            "title": title,
+            "content": content,
+        })
 
-    if not chapters_list:
-        await status.edit_text("❌ Không tải được nội dung chương nào từ trang này.")
-        return
+    return chapters
 
-    book.toc = tuple(chapters_list)
-    book.spine = ['nav'] + chapters_list
 
-    book.add_item(epub.EpubNcx())
-    book.add_item(epub.EpubNav())
+def create_epub(book_title, chapters, output_file):
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
 
-    safe_title = re.sub(r'[\\/*?:"<>|]', "", title).strip() or "Truyen"
-    file_out = f"{safe_title}.epub"
-    epub.write_epub(file_out, book)
+        (root / "META-INF").mkdir()
+        (root / "OEBPS").mkdir()
 
-    await status.edit_text(f"⬆️ Đang gửi file EPUB...")
-    await update.message.reply_document(
-        document=open(file_out, "rb"), 
-        caption=f"✅ Hoàn tất: {title}\n📖 Trọn bộ {len(chapters_list)} chương!"
+        # EPUB bắt buộc: mimetype không được nén
+        (root / "mimetype").write_text(
+            "application/epub+zip",
+            encoding="utf-8"
+        )
+
+        (root / "META-INF" / "container.xml").write_text(
+            """<?xml version="1.0" encoding="UTF-8"?>
+<container version="1.0"
+    xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+    <rootfiles>
+        <rootfile
+            full-path="OEBPS/content.opf"
+            media-type="application/oebps-package+xml"/>
+    </rootfiles>
+</container>
+""",
+            encoding="utf-8"
+        )
+
+        manifest = []
+        spine = []
+        toc_items = []
+
+        for index, chapter in enumerate(chapters, 1):
+            filename = f"chapter_{index}.xhtml"
+            item_id = f"chapter{index}"
+
+            html = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<meta charset="utf-8"/>
+<title>{escape(chapter["title"])}</title>
+<style>
+body {{
+    font-family: serif;
+    line-height: 1.6;
+    margin: 5%;
+}}
+
+h1 {{
+    text-align: center;
+    margin-bottom: 2em;
+}}
+
+p {{
+    text-indent: 2em;
+    margin: 0.7em 0;
+}}
+</style>
+</head>
+<body>
+<h1>{escape(chapter["title"])}</h1>
+{chapter["content"]}
+</body>
+</html>
+"""
+
+            (root / "OEBPS" / filename).write_text(
+                html,
+                encoding="utf-8"
+            )
+
+            manifest.append(
+                f'<item id="{item_id}" '
+                f'href="{filename}" '
+                f'media-type="application/xhtml+xml"/>'
+            )
+
+            spine.append(
+                f'<itemref idref="{item_id}"/>'
+            )
+
+            toc_items.append(
+                f'<li><a href="{filename}">'
+                f'{escape(chapter["title"])}</a></li>'
+            )
+
+        nav = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:epub="http://www.idpf.org/2007/ops">
+<head>
+<meta charset="utf-8"/>
+<title>Mục lục</title>
+</head>
+<body>
+<nav epub:type="toc">
+<h1>Mục lục</h1>
+<ol>
+{"".join(toc_items)}
+</ol>
+</nav>
+</body>
+</html>
+"""
+
+        (root / "OEBPS" / "nav.xhtml").write_text(
+            nav,
+            encoding="utf-8"
+        )
+
+        manifest.append(
+            '<item id="nav" '
+            'href="nav.xhtml" '
+            'media-type="application/xhtml+xml" '
+            'properties="nav"/>'
+        )
+
+        opf = f"""<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf"
+         version="3.0"
+         unique-identifier="book-id">
+
+<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="book-id">book-{abs(hash(book_title))}</dc:identifier>
+    <dc:title>{escape(book_title)}</dc:title>
+    <dc:language>vi</dc:language>
+    <meta property="dcterms:modified">
+        2026-08-24T00:00:00Z
+    </meta>
+</metadata>
+
+<manifest>
+    {"".join(manifest)}
+</manifest>
+
+<spine>
+    {"".join(spine)}
+</spine>
+
+</package>
+"""
+
+        (root / "OEBPS" / "content.opf").write_text(
+            opf,
+            encoding="utf-8"
+        )
+
+        with zipfile.ZipFile(
+            output_file,
+            "w",
+            zipfile.ZIP_DEFLATED
+        ) as epub:
+
+            # mimetype phải là file đầu tiên và không nén
+            epub.write(
+                root / "mimetype",
+                "mimetype",
+                compress_type=zipfile.ZIP_STORED
+            )
+
+            for file in root.rglob("*"):
+                if file.is_file() and file.name != "mimetype":
+                    epub.write(
+                        file,
+                        file.relative_to(root).as_posix()
+                    )
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📚 EPUB Bot\n\n"
+        "Hãy đặt các file chương (.txt/.html) vào thư mục "
+        "`chapters/`, sau đó gửi /convert"
     )
-    
-    if KINDLE_EMAIL and SENDER_EMAIL:
-        success, msg_note = send_to_kindle_email(file_out, title)
-        await update.message.reply_text(f"📧 Trạng thái gửi Kindle: {msg_note}")
 
-    await status.delete()
-    if os.path.exists(file_out):
-        os.remove(file_out)
+
+async def convert(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🔎 Đang đọc các chương..."
+    )
+
+    chapters = read_chapters()
+
+    if not chapters:
+        await update.message.reply_text(
+            "❌ Không tìm thấy chương trong thư mục chapters/."
+        )
+        return
+
+    book_title = "Wattpad EPUB"
+
+    output_file = OUTPUT_DIR / "book.epub"
+
+    create_epub(
+        book_title,
+        chapters,
+        output_file
+    )
+
+    await update.message.reply_text(
+        f"📚 Đã tìm thấy {len(chapters)} chương.\n"
+        "📦 Đang gửi EPUB..."
+    )
+
+    with output_file.open("rb") as f:
+        await update.message.reply_document(
+            document=f,
+            filename="book.epub",
+            caption=(
+                f"✅ EPUB hoàn tất!\n"
+                f"📖 {len(chapters)} chương"
+            )
+        )
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "/start - Hướng dẫn\n"
+        "/convert - Tạo EPUB từ các chương"
+    )
+
 
 def main():
-    threading.Thread(target=run_web_server, daemon=True).start()
-    
-    if not BOT_TOKEN:
-        print("❌ Lỗi: Thiếu BOT_TOKEN trong Environment Variables!")
-        return
-        
+    if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN":
+        raise RuntimeError(
+            "Hãy đặt BOT_TOKEN trước khi chạy bot."
+        )
+
     app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.run_polling(drop_pending_updates=True)
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("convert", convert))
+
+    print("🤖 EPUB bot đang chạy...")
+
+    app.run_polling()
+
 
 if __name__ == "__main__":
     main()
