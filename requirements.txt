@@ -1,6 +1,2 @@
-python-telegram-bot
-beautifulsoup4
-requests
-cloudscraper
-ebooklib
-lxml
+python-telegram-bot>=21.0
+beautifulsoup4>=4.12.0
