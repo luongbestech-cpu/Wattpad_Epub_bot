@@ -83,13 +83,25 @@ def get_chapters(url):
     if "|" in title:
         title = title.split('|')[0].strip()
         
-    # 2. Lấy ảnh bìa chính xác từ thẻ og:image
+    # 2. Lấy ảnh bìa chuẩn (Đã bổ sung thêm twitter:image và quét thẻ img đại diện để không bị thiếu ảnh bìa)
     cover_url = None
-    og_img = soup.find("meta", property="og:image")
+    og_img = (
+        soup.find("meta", property="og:image") or 
+        soup.find("meta", property="product:image") or 
+        soup.find("meta", attrs={"name": "twitter:image"})
+    )
     if og_img and og_img.get("content"):
         cover_url = og_img["content"]
+    
+    if not cover_url:
+        img_el = soup.select_one(".book-image img, .story-image img, .product-image img, img.cover, .td-main-image img, .thumb img, .book img")
+        if img_el and img_el.get("src"):
+            cover_url = img_el.get("src")
 
-    # 3. Quét danh sách chương
+    if cover_url:
+        cover_url = urljoin(url, cover_url)
+
+    # 3. Quét danh sách chương (Giữ nguyên 100% logic của bạn)
     chapters = []
     for a in soup.find_all("a", href=True):
         href = urldefrag(urljoin(url, a.get("href")))[0]
