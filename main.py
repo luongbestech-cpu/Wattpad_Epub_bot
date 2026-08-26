@@ -56,11 +56,23 @@ def get_content(url):
         print(f"Lỗi tải {url}: {e}")
     return None
 
+def extract_chapter_number(name):
+    """Trích xuất số từ tên chương để sắp xếp chuẩn xác 1, 2, 3... 126, 127, 128"""
+    # Tìm các số xuất hiện trong tên chương
+    numbers = re.findall(r'\d+', name)
+    if numbers:
+        # Nếu có số, lấy số đầu tiên làm tiêu chí sắp xếp chính
+        return int(numbers[0])
+    # Nếu là ngoại truyện hoặc từ khóa đặc biệt không có số, đẩy về sau cùng
+    if "ngoại" in name.lower() or "ngoai" in name.lower() or "extra" in name.lower():
+        return 999999
+    return 0
+
 def get_chapters(url):
     soup = get_content(url)
     if not soup: return [], "Truyện", None
     
-    # 1. Lấy tiêu đề truyện chuẩn từ thẻ tiêu đề hoặc Open Graph
+    # 1. Lấy tiêu đề truyện chuẩn từ thẻ og:title hoặc h1
     og_title = soup.find("meta", property="og:title")
     if og_title and og_title.get("content"):
         title = og_title["content"]
@@ -77,21 +89,21 @@ def get_chapters(url):
     if og_img and og_img.get("content"):
         cover_url = og_img["content"]
 
-    # 3. Quét danh sách chương tối ưu cho cấu trúc WordPress/Góc Của Ngố
+    # 3. Quét danh sách chương
     chapters = []
-    # Tìm tất cả các thẻ a, ưu tiên quét trong danh sách mục lục hoặc toàn trang
     for a in soup.find_all("a", href=True):
         href = urldefrag(urljoin(url, a.get("href")))[0]
         text = a.get_text().strip()
         
-        # Nhận diện các từ khóa tiêu đề chương tiếng Việt
-        is_chap = re.match(r"^(chương|chuong|hồi|hoi|quyển|quyen|c\s*\d+|\d+|phần|phan|pn\s*\d+|nt\s*\d+)", text, flags=re.IGNORECASE)
+        is_chap = re.match(r"^(chương|chuong|hồi|hoi|quyển|quyen|c\s*\d+|\d+|phần|phan|pn\s*\d+|nt\s*\d+|ngoại truyện)", text, flags=re.IGNORECASE)
         
         if is_chap and len(text) < 80:
-            # Lọc chỉ lấy các link thuộc về đường dẫn bài viết/chương truyện bên trong web
             if href.startswith("http") and not any(x in href for x in ["#", "wp-login", "author", "category", "tag", "feed"]):
                 if not any(c['url'] == href for c in chapters):
                     chapters.append({"name": text, "url": href})
+
+    # SẮP XẾP LẠI THỨ TỰ CHƯƠNG THEO SỐ HỌC (Tránh lỗi 126, 127, 128 bị đẩy lên đầu)
+    chapters.sort(key=lambda x: extract_chapter_number(x['name']))
 
     return chapters, title, cover_url
 
@@ -99,7 +111,6 @@ def download_chap(url):
     soup = get_content(url)
     if not soup: return None
     
-    # Tìm vùng chứa nội dung bài viết/chương truyện chuẩn của WordPress (Elementor / Single Post)
     container = (
         soup.select_one(".entry-content") or 
         soup.select_one(".elementor-widget-theme-post-content") or 
@@ -114,14 +125,17 @@ def download_chap(url):
     if not container:
         container = soup
 
-    # Trích xuất tất cả các thẻ đoạn văn bản <p> chứa nội dung truyện
+    # XÓA TRIỆT ĐỂ CÁC KHỐI RÁC (Bỏ qua nội dung, breadcrumbs, ngày cập nhật, lượt xem)
+    for garbage in container.select(".entry-header, .post-info, .breadcrumbs, .breadcrumb, nav, footer, header, script, style, form, aside"):
+        garbage.decompose()
+
     paragraphs = container.find_all("p")
     valid_p = []
     
     ignore_keywords = [
-        "chương trước", "chương sau", "chia sẻ", "thích", "đang tải", 
-        "có liên quan", "báo lỗi", "khám phá thêm", "đăng nhập", "bình luận",
-        "viết:", "lúc", "trang chủ", "danh sách"
+        "bỏ qua nội dung", "trang chủ", "lượt xem:", "cập nhật:", "chia sẻ", 
+        "thích", "đang tải", "có liên quan", "báo lỗi", "khám phá thêm", 
+        "đăng nhập", "bình luận", "viết:", "lúc", "danh sách"
     ]
     
     for p in paragraphs:
@@ -129,17 +143,16 @@ def download_chap(url):
         if not text:
             continue
         lower_text = text.lower()
-        # Bỏ qua các thẻ <p> là điều hướng, nút bấm rác ngắn
-        if any(kw in lower_text for kw in ignore_keywords) and len(text) < 50:
+        
+        # Bỏ qua các thẻ <p> chứa rác hệ thống hoặc thông tin lượt xem/ngày tháng
+        if any(kw in lower_text for kw in ignore_keywords) and len(text) < 80:
             continue
+            
         valid_p.append(str(p))
         
     if valid_p:
         return "".join(valid_p)
         
-    # Fallback dự phòng nếu bài viết không dùng thẻ <p>
-    for t in container.find_all(["script", "style", "nav", "footer", "header", "form", "aside", "コメント"]):
-        t.decompose()
     return str(container)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -210,7 +223,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with open(file_out, "rb") as f:
         await update.message.reply_document(
             document=f, 
-            caption=f"✅ Hoàn tất: {title}\n📖 Trọn bộ {len(chapters_list)} chương + Tải đầy đủ nội dung chữ, ảnh bìa & mục lục chuẩn!"
+            caption=f"✅ Hoàn tất: {title}\n📖 Trọn bộ {len(chapters_list)} chương (Đã sửa sạch rác đầu trang & sắp xếp chuẩn thứ tự chương!)"
         )
     
     await status.delete()
