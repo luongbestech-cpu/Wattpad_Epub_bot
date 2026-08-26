@@ -114,6 +114,7 @@ def download_chap(url):
     soup = get_content(url)
     if not soup: return None
     
+    # Tìm vùng chứa nội dung chính của chương
     container = (
         soup.select_one(".chapter-content") or
         soup.select_one(".read-content") or
@@ -128,51 +129,18 @@ def download_chap(url):
     if not container:
         container = soup
 
-    # Chỉ loại bỏ các khối rác giao diện, script, quảng cáo thực sự
+    # Loại bỏ triệt để các khối rác giao diện, script, quảng cáo, điều hướng
     for garbage in container.select(".ads, .entry-header, .post-info, .breadcrumbs, .breadcrumb, nav, footer, header, script, style, form, aside, .sharedaddy"):
         garbage.decompose()
 
-    # GIỮ NGUYÊN SPAN (Không xóa span bừa bãi để tránh làm mất từ vựng của truyện)
-    paragraphs = container.find_all(["p", "div"])
-    valid_p = []
-    
-    ignore_keywords = [
-        "bỏ qua nội dung", "trang chủ", "lượt xem:", "cập nhật lúc", "chia sẻ", 
-        "thích", "đang tải", "có liên quan", "báo lỗi", "khám phá thêm", 
-        "đăng nhập", "bình luận", "viết:", "danh sách"
-    ]
-    
-    seen_texts = set()
-    for p in paragraphs:
-        # Chỉ dọn dẹp script/style rác bên trong thẻ p nếu có
-        for sub in p.find_all(["script", "style"]):
-            sub.decompose()
-            
-        text = p.get_text().strip()
-        if not text or len(text) < 2:
-            continue
-            
-        if text in seen_texts:
-            continue
-            
-        lower_text = text.lower()
-        # Chỉ loại bỏ các thẻ <p> chứa thông tin hệ thống rác ở đầu chương
-        if any(kw in lower_text for kw in ignore_keywords) and len(text) < 100:
-            continue
-            
-        seen_texts.add(text)
-        valid_p.append(str(p))
-        
-    if valid_p:
-        return "".join(valid_p)
-        
+    # Trả về toàn bộ HTML nguyên vẹn của container để tuyệt đối không bị thiếu từ hay mất chữ
     return str(container)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url_match = re.findall(r"https?://[^\s]+", update.message.text or "")
     if not url_match: return
     
-    status = await update.message.reply_text("⏳ Đang kết nối và quét danh sách chương an toàn...")
+    status = await update.message.reply_text("⏳ Đang kết nối và quét danh sách chương (chế độ bảo toàn tuyệt đối văn bản)...")
     story_url = url_match[0]
     
     chapters, title, cover_url = get_chapters(story_url)
@@ -233,7 +201,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with open(file_out, "rb") as f:
         await update.message.reply_document(
             document=f, 
-            caption=f"✅ Hoàn tất: {title}\n📖 Trọn bộ {len(chapters_list)} chương (Đã sửa lỗi bảo vệ chữ, không bị thiếu từ!)"
+            caption=f"✅ Hoàn tất: {title}\n📖 Trọn bộ {len(chapters_list)} chương (Bảo toàn 100% nội dung gốc, không bị mất từ!)"
         )
     
     await status.delete()
