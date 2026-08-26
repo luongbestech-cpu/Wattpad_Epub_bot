@@ -5,7 +5,7 @@ import time
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urljoin, urldefrag
-import requests
+import cloudscraper
 from bs4 import BeautifulSoup
 from ebooklib import epub
 from telegram import Update
@@ -35,20 +35,21 @@ def run_web_server():
     server.serve_forever()
 
 # ============================================================
-# CẤU HÌNH BOT & SESSION
+# CẤU HÌNH BOT & CLOUDSCRAPER (VƯỢT CLOUDFLARE/BẢO VỆ)
 # ============================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN_TRUYEN") or os.getenv("BOT_TOKEN")
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-}
-
-session = requests.Session()
-session.headers.update(HEADERS)
+scraper = cloudscraper.create_scraper(
+    browser={
+        'browser': 'chrome',
+        'platform': 'windows',
+        'desktop': True
+    }
+)
 
 def get_content(url):
     try:
-        res = session.get(url, timeout=25)
+        res = scraper.get(url, timeout=30)
         if res.status_code == 200:
             return BeautifulSoup(res.text, "lxml")
     except Exception as e:
@@ -75,7 +76,7 @@ def get_chapters(url):
         if img_tag and img_tag.get('src'):
             cover_url = img_tag['src']
 
-    # 3. Quét danh sách chương đa dạng
+    # 3. Quét danh sách chương
     chapters = []
     for a in soup.find_all("a", href=True):
         href = urldefrag(urljoin(url, a.get("href")))[0]
@@ -94,7 +95,7 @@ def download_chap(url):
     soup = get_content(url)
     if not soup: return None
     
-    # Tìm vùng chứa nội dung chính xác của các trang web đọc truyện
+    # Thử tìm các vùng chứa nội dung đặc thù
     content = (
         soup.select_one(".chapter-content") or 
         soup.select_one("#chapter-c") or 
@@ -104,24 +105,25 @@ def download_chap(url):
         soup.select_one(".post-body")
     )
     
+    # Nếu không tìm thấy class chuẩn, lấy toàn bộ nội dung body làm gốc để trích xuất
     if not content:
-        return None
+        content = soup.body
+        if not content: return None
     
-    # Xóa các thẻ rác, script, style, nút bấm điều hướng
-    for t in content.find_all(["script", "style", "ins", "button", "iframe", "form", "nav", "aside", "footer"]): 
+    # Dọn dẹp các thẻ rác, menu, điều hướng, script, style
+    for t in content.find_all(["script", "style", "ins", "button", "iframe", "form", "nav", "aside", "footer", "header"]): 
         t.decompose()
         
-    # Xóa khu vực bình luận hoặc các khối chia sẻ nếu lọt vào trong
-    for c_div in content.find_all(id=re.compile("comment", re.I)) + content.find_all(class_=re.compile("comment|social|share|nav|footer", re.I)):
+    for c_div in content.find_all(id=re.compile("comment|sidebar", re.I)) + content.find_all(class_=re.compile("comment|social|share|nav|footer|sidebar", re.I)):
         c_div.decompose()
 
-    # Lọc bỏ các dòng chữ rác ngắn ngủi như điều hướng chương, chia sẻ
+    # Lọc bỏ các dòng chữ rác ngắn ngủi
     keywords_to_remove = [
         "chương trước", "chương sau", "chia sẻ", "thích", "đang tải", 
         "có liên quan", "báo lỗi", "khám phá thêm", "đăng nhập để bình luận"
     ]
     
-    for element in content.find_all(["div", "p", "span"]):
+    for element in content.find_all(["div", "p", "span", "a"]):
         text = element.get_text().strip().lower()
         if text in keywords_to_remove or any(text.startswith(kw) for kw in ["chia sẻ", "thích"]):
             element.decompose()
@@ -132,7 +134,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url_match = re.findall(r"https?://[^\s]+", update.message.text or "")
     if not url_match: return
     
-    status = await update.message.reply_text("⏳ Đang quét danh sách chương từ trang truyện...")
+    status = await update.message.reply_text("⏳ Đang kết nối và quét danh sách chương...")
     story_url = url_match[0]
     
     chapters, title, cover_url = get_chapters(story_url)
@@ -141,7 +143,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status.edit_text("❌ Không tìm thấy chương nào. Hãy kiểm tra lại đường dẫn trang chính của truyện.")
         return
 
-    await status.edit_text(f"📚 {title}\n✅ Tìm thấy {len(chapters)} chương. Đang tiến hành tải nội dung...")
+    await status.edit_text(f"📚 {title}\n✅ Tìm thấy {len(chapters)} chương. Đang tải nội dung...")
 
     results = {}
     for i, c in enumerate(chapters):
@@ -152,7 +154,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await status.edit_text(f"📚 {title}\n⏳ Đang tải: {pct}%\n({i+1}/{len(chapters)})")
             except:
                 pass
-        time.sleep(0.2)
+        time.sleep(0.3)
 
     # Tạo file EPUB chuẩn Kindle
     book = epub.EpubBook()
@@ -164,7 +166,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if cover_url:
         try:
             full_cover_url = cover_url if cover_url.startswith("http") else urljoin(story_url, cover_url)
-            img_res = session.get(full_cover_url, timeout=15)
+            img_res = scraper.get(full_cover_url, timeout=15)
             if img_res.status_code == 200:
                 book.set_cover("cover.jpg", img_res.content)
         except Exception as e:
@@ -179,7 +181,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chapters_list.append(chap)
 
     if not chapters_list:
-        await status.edit_text("❌ Không tải được nội dung chương nào.")
+        await status.edit_text("❌ Không tải được nội dung chương nào do bị chặn.")
         return
 
     # Cấu hình Mục lục (TOC) chuẩn Kindle
@@ -197,7 +199,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with open(file_out, "rb") as f:
         await update.message.reply_document(
             document=f, 
-            caption=f"✅ Hoàn tất: {title}\n📖 Trọn bộ {len(chapters_list)} chương + Đã lấy đầy đủ nội dung văn bản truyện!"
+            caption=f"✅ Hoàn tất: {title}\n📖 Trọn bộ {len(chapters_list)} chương + Vượt tường lửa, lấy đủ nội dung & Mục lục chuẩn Kindle!"
         )
     
     await status.delete()
