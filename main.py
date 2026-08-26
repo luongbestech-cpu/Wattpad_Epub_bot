@@ -94,40 +94,36 @@ def download_chap(url):
     soup = get_content(url)
     if not soup: return None
     
-    # Mở rộng bộ chọn tìm kiếm khung chứa nội dung truyện (hỗ trợ cả các trang blog/web tùy biến cao)
+    # Tìm vùng chứa nội dung chính xác của các trang web đọc truyện
     content = (
-        soup.select_one(".entry-content") or 
-        soup.select_one(".post-content") or 
         soup.select_one(".chapter-content") or 
         soup.select_one("#chapter-c") or 
+        soup.select_one(".entry-content") or 
+        soup.select_one(".post-content") or 
         soup.select_one("article") or
-        soup.select_one(".post-body") or
-        soup.select_one(".entry")
+        soup.select_one(".post-body")
     )
     
     if not content:
-        # Fallback cuối cùng nếu không tìm thấy thẻ đặc thù: lấy toàn bộ body nhưng loại bỏ rác
-        content = soup.body
-        if not content: return None
-
-    # Xóa các thẻ rác, quảng cáo, điều hướng, và đặc biệt là KHUNG BÌNH LUẬN (comments)
-    for t in content.find_all(["script", "style", "ins", "button", "iframe", "form", "nav", "comments", "aside", "footer"]): 
+        return None
+    
+    # Xóa các thẻ rác, script, style, nút bấm điều hướng
+    for t in content.find_all(["script", "style", "ins", "button", "iframe", "form", "nav", "aside", "footer"]): 
         t.decompose()
         
-    # Xóa các khối div/section chứa bình luận thường gặp
+    # Xóa khu vực bình luận hoặc các khối chia sẻ nếu lọt vào trong
     for c_div in content.find_all(id=re.compile("comment", re.I)) + content.find_all(class_=re.compile("comment|social|share|nav|footer", re.I)):
         c_div.decompose()
 
-    # Dọn sạch các dòng chữ thừa, nút chuyển chương, chia sẻ mạng xã hội, thông tin đăng nhập bình luận
+    # Lọc bỏ các dòng chữ rác ngắn ngủi như điều hướng chương, chia sẻ
     keywords_to_remove = [
         "chương trước", "chương sau", "chia sẻ", "thích", "đang tải", 
-        "có liên quan", "báo lỗi", "khám phá thêm", "truyện chỉ đăng tại", 
-        "edit by", "đăng nhập để bình luận", "viết:", "lúc"
+        "có liên quan", "báo lỗi", "khám phá thêm", "đăng nhập để bình luận"
     ]
     
-    for element in content.find_all(["div", "p", "span", "li"]):
+    for element in content.find_all(["div", "p", "span"]):
         text = element.get_text().strip().lower()
-        if any(kw in text for kw in keywords_to_remove):
+        if text in keywords_to_remove or any(text.startswith(kw) for kw in ["chia sẻ", "thích"]):
             element.decompose()
             
     return str(content)
@@ -201,7 +197,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with open(file_out, "rb") as f:
         await update.message.reply_document(
             document=f, 
-            caption=f"✅ Hoàn tất: {title}\n📖 Trọn bộ {len(chapters_list)} chương + Đã lọc sạch bình luận, có Ảnh bìa & Mục lục chuẩn Kindle!"
+            caption=f"✅ Hoàn tất: {title}\n📖 Trọn bộ {len(chapters_list)} chương + Đã lấy đầy đủ nội dung văn bản truyện!"
         )
     
     await status.delete()
