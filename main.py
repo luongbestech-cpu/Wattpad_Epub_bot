@@ -57,13 +57,10 @@ def get_content(url):
     return None
 
 def extract_chapter_number(name):
-    """Trích xuất số từ tên chương để sắp xếp chuẩn xác 1, 2, 3... 126, 127, 128"""
-    # Tìm các số xuất hiện trong tên chương
+    """Trích xuất số từ tên chương để sắp xếp chuẩn xác 1, 2, 3... 126, 127, 128..."""
     numbers = re.findall(r'\d+', name)
     if numbers:
-        # Nếu có số, lấy số đầu tiên làm tiêu chí sắp xếp chính
         return int(numbers[0])
-    # Nếu là ngoại truyện hoặc từ khóa đặc biệt không có số, đẩy về sau cùng
     if "ngoại" in name.lower() or "ngoai" in name.lower() or "extra" in name.lower():
         return 999999
     return 0
@@ -89,7 +86,7 @@ def get_chapters(url):
     if og_img and og_img.get("content"):
         cover_url = og_img["content"]
 
-    # 3. Quét danh sách chương
+    # 3. Quét danh sách chương tương thích đa nền tảng
     chapters = []
     for a in soup.find_all("a", href=True):
         href = urldefrag(urljoin(url, a.get("href")))[0]
@@ -98,11 +95,11 @@ def get_chapters(url):
         is_chap = re.match(r"^(chương|chuong|hồi|hoi|quyển|quyen|c\s*\d+|\d+|phần|phan|pn\s*\d+|nt\s*\d+|ngoại truyện)", text, flags=re.IGNORECASE)
         
         if is_chap and len(text) < 80:
-            if href.startswith("http") and not any(x in href for x in ["#", "wp-login", "author", "category", "tag", "feed"]):
+            if href.startswith("http") and not any(x in href for x in ["#", "wp-login", "author", "category", "tag", "feed", "dang-nhap", "dang-ky"]):
                 if not any(c['url'] == href for c in chapters):
                     chapters.append({"name": text, "url": href})
 
-    # SẮP XẾP LẠI THỨ TỰ CHƯƠNG THEO SỐ HỌC (Tránh lỗi 126, 127, 128 bị đẩy lên đầu)
+    # Sắp xếp lại thứ tự chương theo số học (Tránh lỗi chương cuối bị đẩy lên đầu)
     chapters.sort(key=lambda x: extract_chapter_number(x['name']))
 
     return chapters, title, cover_url
@@ -111,6 +108,7 @@ def download_chap(url):
     soup = get_content(url)
     if not soup: return None
     
+    # Các vùng chứa nội dung phổ biến của các trang truyện
     container = (
         soup.select_one(".entry-content") or 
         soup.select_one(".elementor-widget-theme-post-content") or 
@@ -125,7 +123,7 @@ def download_chap(url):
     if not container:
         container = soup
 
-    # XÓA TRIỆT ĐỂ CÁC KHỐI RÁC (Bỏ qua nội dung, breadcrumbs, ngày cập nhật, lượt xem)
+    # Xóa triệt để các khối rác, breadcrumbs, điều hướng
     for garbage in container.select(".entry-header, .post-info, .breadcrumbs, .breadcrumb, nav, footer, header, script, style, form, aside"):
         garbage.decompose()
 
@@ -144,7 +142,6 @@ def download_chap(url):
             continue
         lower_text = text.lower()
         
-        # Bỏ qua các thẻ <p> chứa rác hệ thống hoặc thông tin lượt xem/ngày tháng
         if any(kw in lower_text for kw in ignore_keywords) and len(text) < 80:
             continue
             
@@ -187,7 +184,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     book.set_title(title)
     book.set_language('vi')
 
-    # Thêm ảnh bìa
+    # Thêm ảnh bìa nếu có
     if cover_url:
         try:
             img_res = scraper.get(cover_url, timeout=15)
@@ -223,7 +220,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with open(file_out, "rb") as f:
         await update.message.reply_document(
             document=f, 
-            caption=f"✅ Hoàn tất: {title}\n📖 Trọn bộ {len(chapters_list)} chương (Đã sửa sạch rác đầu trang & sắp xếp chuẩn thứ tự chương!)"
+            caption=f"✅ Hoàn tất: {title}\n📖 Trọn bộ {len(chapters_list)} chương (Đã làm sạch rác & sắp xếp chuẩn mục lục!)"
         )
     
     await status.delete()
@@ -231,6 +228,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         os.remove(file_out)
 
 def main():
+    # Khởi động Web Server ngầm phục vụ Render
     threading.Thread(target=run_web_server, daemon=True).start()
     
     if not BOT_TOKEN:
