@@ -114,7 +114,6 @@ def download_chap(url):
     soup = get_content(url)
     if not soup: return None
     
-    # Tìm vùng chứa nội dung chính tối ưu cho các trang truyện hiện đại
     container = (
         soup.select_one(".chapter-content") or
         soup.select_one(".read-content") or
@@ -129,41 +128,36 @@ def download_chap(url):
     if not container:
         container = soup
 
-    # Loại bỏ các bình luận HTML ẩn thường dùng để phá bot
-    for comment in container.find_all(text=lambda text: isinstance(text, Comment)):
-        comment.extract()
-
-    # Dọn dẹp các thành phần rác giao diện, script, style, quảng cáo
+    # Chỉ loại bỏ các khối rác giao diện, script, quảng cáo thực sự
     for garbage in container.select(".ads, .entry-header, .post-info, .breadcrumbs, .breadcrumb, nav, footer, header, script, style, form, aside, .sharedaddy"):
         garbage.decompose()
 
-    # Xóa sạch các thẻ span rác ẩn chữ thường thấy ở các web chống cào
-    for hidden_span in container.select("span[style*='display:none'], span.hidden, span[class*='protect']"):
-        hidden_span.decompose()
-
+    # GIỮ NGUYÊN SPAN (Không xóa span bừa bãi để tránh làm mất từ vựng của truyện)
     paragraphs = container.find_all(["p", "div"])
     valid_p = []
+    
     ignore_keywords = [
-        "bỏ qua nội dung", "trang chủ", "lượt xem:", "cập nhật:", "chia sẻ", 
+        "bỏ qua nội dung", "trang chủ", "lượt xem:", "cập nhật lúc", "chia sẻ", 
         "thích", "đang tải", "có liên quan", "báo lỗi", "khám phá thêm", 
-        "đăng nhập", "bình luận", "viết:", "lúc", "danh sách", "truyện mơ"
+        "đăng nhập", "bình luận", "viết:", "danh sách"
     ]
     
     seen_texts = set()
     for p in paragraphs:
-        # Làm sạch các thẻ con không cần thiết bên trong thẻ p/div
+        # Chỉ dọn dẹp script/style rác bên trong thẻ p nếu có
         for sub in p.find_all(["script", "style"]):
             sub.decompose()
             
         text = p.get_text().strip()
-        if not text or len(text) < 3:
+        if not text or len(text) < 2:
             continue
             
         if text in seen_texts:
             continue
             
         lower_text = text.lower()
-        if any(kw in lower_text for kw in ignore_keywords) and len(text) < 80:
+        # Chỉ loại bỏ các thẻ <p> chứa thông tin hệ thống rác ở đầu chương
+        if any(kw in lower_text for kw in ignore_keywords) and len(text) < 100:
             continue
             
         seen_texts.add(text)
@@ -178,7 +172,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url_match = re.findall(r"https?://[^\s]+", update.message.text or "")
     if not url_match: return
     
-    status = await update.message.reply_text("⏳ Đang kết nối và quét danh sách chương từ trang...")
+    status = await update.message.reply_text("⏳ Đang kết nối và quét danh sách chương an toàn...")
     story_url = url_match[0]
     
     chapters, title, cover_url = get_chapters(story_url)
@@ -187,7 +181,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status.edit_text("❌ Không tìm thấy chương nào. Hãy kiểm tra lại đường dẫn trang chính của truyện.")
         return
 
-    await status.edit_text(f"📚 {title}\n✅ Tìm thấy {len(chapters)} chương. Đang tải nội dung an toàn chống mất chữ...")
+    await status.edit_text(f"📚 {title}\n✅ Tìm thấy {len(chapters)} chương. Đang tải toàn vẹn nội dung...")
 
     results = {}
     for i, c in enumerate(chapters):
@@ -198,8 +192,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await status.edit_text(f"📚 {title}\n⏳ Đang tải: {pct}%\n({i+1}/{len(chapters)})")
             except:
                 pass
-        # Tăng độ trễ lên một chút để tránh bị server chặn hoặc trả về thiếu chữ
-        time.sleep(0.6)
+        time.sleep(0.5)
 
     book = epub.EpubBook()
     book.set_identifier('truyen_' + re.sub(r'\W+', '', title))
@@ -240,7 +233,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with open(file_out, "rb") as f:
         await update.message.reply_document(
             document=f, 
-            caption=f"✅ Hoàn tất: {title}\n📖 Trọn bộ {len(chapters_list)} chương (Đã lọc sạch thẻ rác chống mất chữ!)"
+            caption=f"✅ Hoàn tất: {title}\n📖 Trọn bộ {len(chapters_list)} chương (Đã sửa lỗi bảo vệ chữ, không bị thiếu từ!)"
         )
     
     await status.delete()
