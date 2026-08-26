@@ -35,7 +35,7 @@ def run_web_server():
     server.serve_forever()
 
 # ============================================================
-# CẤU HÌNH BOT & CLOUDSCRAPER (VƯỢT CLOUDFLARE/BẢO VỆ)
+# CẤU HÌNH BOT & CLOUDSCRAPER
 # ============================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN_TRUYEN") or os.getenv("BOT_TOKEN")
 
@@ -60,32 +60,36 @@ def get_chapters(url):
     soup = get_content(url)
     if not soup: return [], "Truyện", None
     
-    # 1. Lấy tiêu đề truyện
-    title_el = soup.select_one("h1") or soup.select_one(".title") or soup.title
-    title = title_el.get_text().strip() if title_el else "Truyện"
+    # 1. Lấy tiêu đề truyện chuẩn từ thẻ tiêu đề hoặc Open Graph
+    og_title = soup.find("meta", property="og:title")
+    if og_title and og_title.get("content"):
+        title = og_title["content"]
+    else:
+        title_el = soup.select_one("h1") or soup.title
+        title = title_el.get_text().strip() if title_el else "Truyện"
+        
     if "|" in title:
         title = title.split('|')[0].strip()
         
-    # 2. Lấy ảnh bìa
+    # 2. Lấy ảnh bìa chính xác từ thẻ og:image
     cover_url = None
     og_img = soup.find("meta", property="og:image")
     if og_img and og_img.get("content"):
         cover_url = og_img["content"]
-    else:
-        img_tag = soup.select_one(".book img") or soup.select_one(".truyen-info img") or soup.find("img")
-        if img_tag and img_tag.get('src'):
-            cover_url = img_tag['src']
 
-    # 3. Quét danh sách chương
+    # 3. Quét danh sách chương tối ưu cho cấu trúc WordPress/Góc Của Ngố
     chapters = []
+    # Tìm tất cả các thẻ a, ưu tiên quét trong danh sách mục lục hoặc toàn trang
     for a in soup.find_all("a", href=True):
         href = urldefrag(urljoin(url, a.get("href")))[0]
         text = a.get_text().strip()
         
-        is_chap = re.match(r"^(chương|chuong|hồi|hoi|quyển|quyen|c\s*\d+|\d+|pn\s*\d+|nt\s*\d+)", text, flags=re.IGNORECASE)
+        # Nhận diện các từ khóa tiêu đề chương tiếng Việt
+        is_chap = re.match(r"^(chương|chuong|hồi|hoi|quyển|quyen|c\s*\d+|\d+|phần|phan|pn\s*\d+|nt\s*\d+)", text, flags=re.IGNORECASE)
         
-        if is_chap and len(text) < 60:
-            if any(k in href for k in ["chuong-", "hoi-", "chapter-", "/truyen/"]):
+        if is_chap and len(text) < 80:
+            # Lọc chỉ lấy các link thuộc về đường dẫn bài viết/chương truyện bên trong web
+            if href.startswith("http") and not any(x in href for x in ["#", "wp-login", "author", "category", "tag", "feed"]):
                 if not any(c['url'] == href for c in chapters):
                     chapters.append({"name": text, "url": href})
 
@@ -95,40 +99,48 @@ def download_chap(url):
     soup = get_content(url)
     if not soup: return None
     
-    # Thử tìm các vùng chứa nội dung đặc thù
-    content = (
+    # Tìm vùng chứa nội dung bài viết/chương truyện chuẩn của WordPress (Elementor / Single Post)
+    container = (
+        soup.select_one(".entry-content") or 
+        soup.select_one(".elementor-widget-theme-post-content") or 
+        soup.select_one(".post-content") or 
         soup.select_one(".chapter-content") or 
         soup.select_one("#chapter-c") or 
-        soup.select_one(".entry-content") or 
-        soup.select_one(".post-content") or 
         soup.select_one("article") or
-        soup.select_one(".post-body")
+        soup.select_one(".post-body") or
+        soup.body
     )
     
-    # Nếu không tìm thấy class chuẩn, lấy toàn bộ nội dung body làm gốc để trích xuất
-    if not content:
-        content = soup.body
-        if not content: return None
-    
-    # Dọn dẹp các thẻ rác, menu, điều hướng, script, style
-    for t in content.find_all(["script", "style", "ins", "button", "iframe", "form", "nav", "aside", "footer", "header"]): 
-        t.decompose()
-        
-    for c_div in content.find_all(id=re.compile("comment|sidebar", re.I)) + content.find_all(class_=re.compile("comment|social|share|nav|footer|sidebar", re.I)):
-        c_div.decompose()
+    if not container:
+        container = soup
 
-    # Lọc bỏ các dòng chữ rác ngắn ngủi
-    keywords_to_remove = [
+    # Trích xuất tất cả các thẻ đoạn văn bản <p> chứa nội dung truyện
+    paragraphs = container.find_all("p")
+    valid_p = []
+    
+    ignore_keywords = [
         "chương trước", "chương sau", "chia sẻ", "thích", "đang tải", 
-        "có liên quan", "báo lỗi", "khám phá thêm", "đăng nhập để bình luận"
+        "có liên quan", "báo lỗi", "khám phá thêm", "đăng nhập", "bình luận",
+        "viết:", "lúc", "trang chủ", "danh sách"
     ]
     
-    for element in content.find_all(["div", "p", "span", "a"]):
-        text = element.get_text().strip().lower()
-        if text in keywords_to_remove or any(text.startswith(kw) for kw in ["chia sẻ", "thích"]):
-            element.decompose()
-            
-    return str(content)
+    for p in paragraphs:
+        text = p.get_text().strip()
+        if not text:
+            continue
+        lower_text = text.lower()
+        # Bỏ qua các thẻ <p> là điều hướng, nút bấm rác ngắn
+        if any(kw in lower_text for kw in ignore_keywords) and len(text) < 50:
+            continue
+        valid_p.append(str(p))
+        
+    if valid_p:
+        return "".join(valid_p)
+        
+    # Fallback dự phòng nếu bài viết không dùng thẻ <p>
+    for t in container.find_all(["script", "style", "nav", "footer", "header", "form", "aside", "コメント"]):
+        t.decompose()
+    return str(container)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url_match = re.findall(r"https?://[^\s]+", update.message.text or "")
@@ -165,8 +177,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Thêm ảnh bìa
     if cover_url:
         try:
-            full_cover_url = cover_url if cover_url.startswith("http") else urljoin(story_url, cover_url)
-            img_res = scraper.get(full_cover_url, timeout=15)
+            img_res = scraper.get(cover_url, timeout=15)
             if img_res.status_code == 200:
                 book.set_cover("cover.jpg", img_res.content)
         except Exception as e:
@@ -181,7 +192,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chapters_list.append(chap)
 
     if not chapters_list:
-        await status.edit_text("❌ Không tải được nội dung chương nào do bị chặn.")
+        await status.edit_text("❌ Không tải được nội dung chương nào.")
         return
 
     # Cấu hình Mục lục (TOC) chuẩn Kindle
@@ -199,7 +210,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with open(file_out, "rb") as f:
         await update.message.reply_document(
             document=f, 
-            caption=f"✅ Hoàn tất: {title}\n📖 Trọn bộ {len(chapters_list)} chương + Vượt tường lửa, lấy đủ nội dung & Mục lục chuẩn Kindle!"
+            caption=f"✅ Hoàn tất: {title}\n📖 Trọn bộ {len(chapters_list)} chương + Tải đầy đủ nội dung chữ, ảnh bìa & mục lục chuẩn!"
         )
     
     await status.delete()
