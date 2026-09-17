@@ -1,6 +1,7 @@
 import os
 import re
 import time
+from urllib.parse import urldefrag, urljoin
 import cloudscraper
 from bs4 import BeautifulSoup
 from ebooklib import epub
@@ -38,7 +39,7 @@ def get_content(url):
 
 
 def extract_chapter_number(name):
-  """Trích xuất số từ tên chương để sắp xếp chuẩn xác 1, 2, 3... 126, 127, 128"""
+  """Trích xuất số từ tên chương để sắp xếp chuẩn xác 1, 2, 3..."""
   numbers = re.findall(r"\d+", name)
   if numbers:
     return int(numbers[0])
@@ -67,7 +68,7 @@ def get_chapters(url):
   if "|" in title:
     title = title.split("|")[0].strip()
 
-  # 2. Lấy ảnh bìa hỗ trợ Lazy Load (data-src, data-original) và các class phổ biến
+  # 2. Lấy ảnh bìa hỗ trợ Lazy Load
   cover_url = None
   og_img = (
       soup.find("meta", property="og:image")
@@ -90,23 +91,51 @@ def get_chapters(url):
   if cover_url:
     cover_url = urljoin(url, cover_url)
 
-  # 3. Quét danh sách chương
+  # 3. Quét danh sách chương với bộ lọc khắt khe chống quét nhầm rác
   chapters = []
-  for a in soup.find_all("a", href=True):
+  content_container = soup.select_one(
+      ".entry-content, .post-content, .chapter-list, #list-chapter"
+  )
+  search_scope = content_container if content_container else soup
+
+  for a in search_scope.find_all("a", href=True):
     href = urldefrag(urljoin(url, a.get("href")))[0]
     text = a.get_text().strip()
 
     is_chap = re.match(
-        r"^(chương|chuong|hồi|hoi|quyển|quyen|c\s*\d+|\d+|phần|phan|pn\s*\d+|nt\s*\d+|ngoại"
-        r" truyện)",
+        r"^(chương|chuong|hồi|hoi|quyển|quyen|c\s*\d+|phần|phan|pn\s*\d+|nt\s*\d+|ngoại\s*truyện)\s*\d*",
         text,
         flags=re.IGNORECASE,
     )
+    is_pure_number_chap = bool(re.match(r"^\d+$", text))
 
-    if is_chap and len(text) < 80:
+    if (is_chap or is_pure_number_chap) and len(text) < 60:
+      text_lower = text.lower()
+      if any(
+          bad in text_lower
+          for bad in [
+              "person",
+              "trang",
+              "comment",
+              "bình luận",
+              "share",
+              "author",
+              "login",
+          ]
+      ):
+        continue
+
       if href.startswith("http") and not any(
           x in href
-          for x in ["#", "wp-login", "author", "category", "tag", "feed"]
+          for x in [
+              "#",
+              "wp-login",
+              "author",
+              "category",
+              "tag",
+              "feed",
+              "wp-admin",
+          ]
       ):
         if not any(c["url"] == href for c in chapters):
           chapters.append({"name": text, "url": href})
@@ -253,7 +282,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         document=f,
         caption=(
             f"✅ Hoàn tất: {title}\n📖 Trọn bộ {len(chapters_list)} chương (Đã"
-            " quét ảnh bìa thành công & giữ nguyên bộ lọc gốc!)"
+            " quét ảnh bìa thành công & lọc sạch rác chuẩn xác!)"
         ),
     )
 
@@ -277,7 +306,6 @@ def webhook():
   json_string = request.get_data().decode("utf-8")
   update = Update.de_json(json_string, application.bot)
 
-  # Chạy hàm xử lý tin nhắn bất đồng bộ của Telegram
   async def process():
     await application.update_queue.put(update)
 
@@ -293,7 +321,6 @@ def index():
   render_url = os.getenv("RENDER_EXTERNAL_URL")
   if render_url:
     webhook_url = f"{render_url}/{BOT_TOKEN}"
-    # Đăng ký webhook với Telegram
     import asyncio
 
     async def set_wh():
@@ -308,7 +335,6 @@ def index():
 # KHỞI CHẠY ỨNG DỤNG
 # ============================================================
 if __name__ == "__main__":
-  # Khởi động trước ứng dụng Telegram Bot ngầm
   import asyncio
 
   async def init_bot():
@@ -317,6 +343,5 @@ if __name__ == "__main__":
 
   asyncio.run(init_bot())
 
-  # Chạy Flask Server trên cổng của Render
   port = int(os.environ.get("PORT", 10000))
   app.run(host="0.0.0.0", port=port)
