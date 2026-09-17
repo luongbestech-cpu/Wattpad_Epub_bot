@@ -81,7 +81,8 @@ def get_chapters(url):
   if not cover_url:
     img_el = soup.select_one(
         ".book img, .info-image img, .story-image img, .product-image img,"
-        " img.cover, .detail img, .col-image img, .book-image img"
+        " img.cover, .detail img, .col-image img, .book-image img, .entry-content"
+        " img, article img"
     )
     if img_el:
       cover_url = (
@@ -91,40 +92,47 @@ def get_chapters(url):
   if cover_url:
     cover_url = urljoin(url, cover_url)
 
-  # 3. Quét danh sách chương với bộ lọc khắt khe chống quét nhầm rác
+  # 3. Quét danh sách chương tối ưu riêng cho WordPress
   chapters = []
-  content_container = soup.select_one(
-      ".entry-content, .post-content, .chapter-list, #list-chapter"
-  )
-  search_scope = content_container if content_container else soup
 
-  for a in search_scope.find_all("a", href=True):
+  for a in soup.find_all("a", href=True):
     href = urldefrag(urljoin(url, a.get("href")))[0]
     text = a.get_text().strip()
+    if not text:
+      continue
 
-    is_chap = re.match(
-        r"^(chương|chuong|hồi|hoi|quyển|quyen|c\s*\d+|phần|phan|pn\s*\d+|nt\s*\d+|ngoại\s*truyện)\s*\d*",
-        text,
-        flags=re.IGNORECASE,
+    text_lower = text.lower()
+
+    # Lọc bỏ các từ khóa rác WordPress
+    if any(
+        bad in text_lower
+        for bad in [
+            "person",
+            "trang",
+            "comment",
+            "bình luận",
+            "share",
+            "author",
+            "login",
+            "đăng nhập",
+            "menu",
+            "home",
+            "giới thiệu",
+            "thông tin",
+        ]
+    ):
+      continue
+
+    # Dùng re.search để bắt linh hoạt tên chương dù có chứa tên truyện phía trước
+    is_chap = bool(
+        re.search(
+            r"(chương|chuong|chap|hồi|hoi|quyển|quyen|phần|phan|pn|nt|ngoại"
+            r" truyện|\b\d+\b)",
+            text_lower,
+        )
     )
-    is_pure_number_chap = bool(re.match(r"^\d+$", text))
 
-    if (is_chap or is_pure_number_chap) and len(text) < 60:
-      text_lower = text.lower()
-      if any(
-          bad in text_lower
-          for bad in [
-              "person",
-              "trang",
-              "comment",
-              "bình luận",
-              "share",
-              "author",
-              "login",
-          ]
-      ):
-        continue
-
+    if is_chap and len(text) < 100:
       if href.startswith("http") and not any(
           x in href
           for x in [
@@ -135,6 +143,7 @@ def get_chapters(url):
               "tag",
               "feed",
               "wp-admin",
+              "wp-json",
           ]
       ):
         if not any(c["url"] == href for c in chapters):
@@ -211,7 +220,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return
 
   status = await update.message.reply_text(
-      "⏳ Đang kết nối và quét danh sách chương..."
+      "⏳ Đang kết nối và quét danh sách chương WordPress..."
   )
   story_url = url_match[0]
 
@@ -281,8 +290,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_document(
         document=f,
         caption=(
-            f"✅ Hoàn tất: {title}\n📖 Trọn bộ {len(chapters_list)} chương (Đã"
-            " quét ảnh bìa thành công & lọc sạch rác chuẩn xác!)"
+            f"✅ Hoàn tất: {title}\n📖 Trọn bộ {len(chapters_list)} chương (Chuẩn"
+            " WordPress + Ảnh bìa đầy đủ!)"
         ),
     )
 
@@ -298,13 +307,27 @@ application.add_handler(
 
 
 # ============================================================
-# FLASK ROUTES (WEBHOOK & HEALTH CHECK)
+# FLASK ROUTES (WEBHOOK & CHỐNG LẶP REQUEST)
 # ============================================================
+processed_updates = set()
+
+
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
-  """Nhận dữ liệu từ Telegram gửi đến"""
+  """Nhận dữ liệu từ Telegram gửi đến có chống lặp"""
   json_string = request.get_data().decode("utf-8")
   update = Update.de_json(json_string, application.bot)
+
+  if not update:
+    return "OK", 200
+
+  # Chặn các request bị Telegram gửi lại (retry) do xử lý lâu
+  if update.update_id in processed_updates:
+    return "OK", 200
+
+  processed_updates.add(update.update_id)
+  if len(processed_updates) > 100:
+    processed_updates.pop()
 
   async def process():
     await application.update_queue.put(update)
@@ -327,8 +350,8 @@ def index():
       await application.bot.set_webhook(url=webhook_url)
 
     asyncio.run(set_wh())
-    return f"Bot Truyen Webhook đang hoạt động! Đã trỏ tới: {webhook_url}", 200
-  return "Bot Truyen đang chạy!", 200
+    return f"Bot WordPress Webhook đang hoạt động! Đã trỏ tới: {webhook_url}", 200
+  return "Bot WordPress đang chạy!", 200
 
 
 # ============================================================
