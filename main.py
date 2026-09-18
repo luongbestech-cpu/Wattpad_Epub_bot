@@ -60,17 +60,26 @@ def get_content(url):
 
 
 def extract_chapter_number(name):
-  """Trích xuất số từ tên chương để sắp xếp chuẩn xác 1, 2, 3... 126, 127, 128"""
+  """Phân loại thứ tự: Giới thiệu/Văn án lên đầu (-1), Chương chính ở giữa, Ngoại truyện xuống cuối"""
+  lower_name = name.lower()
+
+  # Nếu là trang giới thiệu, văn án hoặc kiểu "1 person" -> Đưa lên đầu tiên
+  if "person" in lower_name or "giới thiệu" in lower_name or "van an" in lower_name:
+    return -1
+
   numbers = re.findall(r"\d+", name)
-  if numbers:
-    return int(numbers[0])
+  num = int(numbers[0]) if numbers else 0
+
+  # Nếu là ngoại truyện hoặc NT -> Đẩy xuống cuối sau các chương chính
   if (
-      "ngoại" in name.lower()
-      or "ngoai" in name.lower()
-      or "extra" in name.lower()
+      "ngoại" in lower_name
+      or "ngoai" in lower_name
+      or "extra" in lower_name
+      or "nt" in lower_name
   ):
-    return 999999
-  return 0
+    return 100000 + num
+
+  return num
 
 
 def get_chapters(url):
@@ -89,20 +98,22 @@ def get_chapters(url):
   if "|" in title:
     title = title.split("|")[0].strip()
 
-  # 2. Lấy ảnh bìa hỗ trợ Lazy Load (data-src, data-original) và các class phổ biến
+  # 2. Lấy ảnh bìa tối ưu toàn diện cho WordPress
   cover_url = None
   og_img = (
       soup.find("meta", property="og:image")
-      or soup.find("meta", property="product:image")
-      or soup.find("meta", attrs={"name": "twitter:image"})
+      or soup.find("meta", property="twitter:image")
+      or soup.find("meta", attrs={"name": "twitter:image:src"})
+      or soup.find("meta", attrs={"itemprop": "image"})
   )
   if og_img and og_img.get("content"):
     cover_url = og_img["content"]
 
   if not cover_url:
     img_el = soup.select_one(
-        ".book img, .info-image img, .story-image img, .product-image img,"
-        " img.cover, .detail img, .col-image img, .book-image img"
+        ".entry-content img, .post-content img, article img,"
+        " .wp-block-image img, .book img, .info-image img, .story-image img,"
+        " .product-image img, img.cover, .detail img"
     )
     if img_el:
       cover_url = (
@@ -112,15 +123,15 @@ def get_chapters(url):
   if cover_url:
     cover_url = urljoin(url, cover_url)
 
-  # 3. Quét danh sách chương (Giữ nguyên 100% logic bản gốc)
+  # 3. Quét danh sách chương (Bao gồm trang Giới thiệu dạng "person" và các chương chuẩn)
   chapters = []
   for a in soup.find_all("a", href=True):
     href = urldefrag(urljoin(url, a.get("href")))[0]
     text = a.get_text().strip()
 
     is_chap = re.match(
-        r"^(chương|chuong|hồi|hoi|quyển|quyen|c\s*\d+|\d+|phần|phan|pn\s*\d+|nt\s*\d+|ngoại"
-        r" truyện)",
+        r"^(chương|chuong|hồi|hoi|quyển|quyen|c\s*\d+|\d+$|phần|phan|pn\s*\d+|nt\s*\d+|ngoại"
+        r" truyện|.*person.*)",
         text,
         flags=re.IGNORECASE,
     )
@@ -132,7 +143,7 @@ def get_chapters(url):
         if not any(c["url"] == href for c in chapters):
           chapters.append({"name": text, "url": href})
 
-  # SẮP XẾP LẠI THỨ TỰ CHƯƠNG THEO SỐ HỌC
+  # SẮP XẾP LẠI THỨ TỰ: Giới thiệu -> Chương chính -> Ngoại truyện
   chapters.sort(key=lambda x: extract_chapter_number(x["name"]))
 
   return chapters, title, cover_url
@@ -282,7 +293,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         document=f,
         caption=(
             f"✅ Hoàn tất: {title}\n📖 Trọn bộ {len(chapters_list)} chương (Đã"
-            " quét ảnh bìa thành công & giữ nguyên bộ lọc gốc!)"
+            " sắp xếp Giới thiệu lên đầu, Ngoại truyện xuống cuối!)"
         ),
     )
 
