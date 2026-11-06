@@ -49,13 +49,17 @@ scraper = cloudscraper.create_scraper(
 )
 
 
-def get_content(url):
-  try:
-    res = scraper.get(url, timeout=30)
-    if res.status_code == 200:
-      return BeautifulSoup(res.text, "lxml")
-  except Exception as e:
-    print(f"Lỗi tải {url}: {e}")
+def get_content(url, retries=3, delay=2):
+  """Thêm cơ chế Retry khi gặp lỗi kết nối hoặc bị Cloudflare chặn tạm thời"""
+  for attempt in range(retries):
+    try:
+      res = scraper.get(url, timeout=30)
+      if res.status_code == 200:
+        return BeautifulSoup(res.text, "lxml")
+      elif res.status_code in [403, 503, 429]:
+        time.sleep(delay * (attempt + 1))
+    except Exception as e:
+      time.sleep(delay)
   return None
 
 
@@ -63,14 +67,12 @@ def extract_chapter_number(name):
   """Phân loại thứ tự: Giới thiệu/Văn án lên đầu (-1), Chương chính ở giữa, Ngoại truyện xuống cuối"""
   lower_name = name.lower()
 
-  # Nếu là trang giới thiệu, văn án hoặc kiểu "1 person" -> Đưa lên đầu tiên
   if "person" in lower_name or "giới thiệu" in lower_name or "van an" in lower_name:
     return -1
 
   numbers = re.findall(r"\d+", name)
   num = int(numbers[0]) if numbers else 0
 
-  # Nếu là ngoại truyện hoặc NT -> Đẩy xuống cuối sau các chương chính
   if (
       "ngoại" in lower_name
       or "ngoai" in lower_name
@@ -87,7 +89,6 @@ def get_chapters(url):
   if not soup:
     return [], "Truyện", None
 
-  # 1. Lấy tiêu đề truyện chuẩn
   og_title = soup.find("meta", property="og:title")
   if og_title and og_title.get("content"):
     title = og_title["content"]
@@ -98,7 +99,6 @@ def get_chapters(url):
   if "|" in title:
     title = title.split("|")[0].strip()
 
-  # 2. Lấy ảnh bìa tối ưu toàn diện cho WordPress
   cover_url = None
   og_img = (
       soup.find("meta", property="og:image")
@@ -123,7 +123,6 @@ def get_chapters(url):
   if cover_url:
     cover_url = urljoin(url, cover_url)
 
-  # 3. Quét danh sách chương (Bao gồm trang Giới thiệu dạng "person" và các chương chuẩn)
   chapters = []
   for a in soup.find_all("a", href=True):
     href = urldefrag(urljoin(url, a.get("href")))[0]
@@ -143,7 +142,6 @@ def get_chapters(url):
         if not any(c["url"] == href for c in chapters):
           chapters.append({"name": text, "url": href})
 
-  # SẮP XẾP LẠI THỨ TỰ: Giới thiệu -> Chương chính -> Ngoại truyện
   chapters.sort(key=lambda x: extract_chapter_number(x["name"]))
 
   return chapters, title, cover_url
@@ -154,8 +152,12 @@ def download_chap(url):
   if not soup:
     return None
 
+  # Mở rộng các selector phổ biến của web truyện WordPress
   container = (
       soup.select_one(".entry-content")
+      or soup.select_one(".reading-content")
+      or soup.select_one(".text-left")
+      or soup.select_one(".box-chap")
       or soup.select_one(".elementor-widget-theme-post-content")
       or soup.select_one(".post-content")
       or soup.select_one(".chapter-content")
@@ -168,7 +170,6 @@ def download_chap(url):
   if not container:
     container = soup
 
-  # XÓA TRIỆT ĐỂ CÁC KHỐI RÁC
   for garbage in container.select(
       ".entry-header, .post-info, .breadcrumbs, .breadcrumb, nav, footer,"
       " header, script, style, form, aside"
@@ -239,7 +240,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
   results = {}
   for i, c in enumerate(chapters):
     results[i] = download_chap(c["url"])
-    if i % 15 == 0 or i == len(chapters) - 1:
+    if i % 10 == 0 or i == len(chapters) - 1:
       pct = int(((i + 1) / len(chapters)) * 100)
       try:
         await status.edit_text(
@@ -247,15 +248,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
       except:
         pass
-    time.sleep(0.3)
+    # Tăng thời gian delay lên 1.2 giây để tránh bị tường lửa/Cloudflare khóa IP giữa chừng
+    time.sleep(1.2)
 
-  # Tạo file EPUB chuẩn Kindle
   book = epub.EpubBook()
   book.set_identifier("truyen_" + re.sub(r"\W+", "", title))
   book.set_title(title)
   book.set_language("vi")
 
-  # Thêm ảnh bìa
   if cover_url:
     try:
       img_res = scraper.get(cover_url, timeout=15)
@@ -276,7 +276,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await status.edit_text("❌ Không tải được nội dung chương nào.")
     return
 
-  # Cấu hình Mục lục (TOC) chuẩn Kindle
   book.toc = tuple(chapters_list)
   book.spine = ["nav"] + chapters_list
 
